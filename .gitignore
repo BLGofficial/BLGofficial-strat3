@@ -1,0 +1,15 @@
+# CMake build trees
+build*/
+cmake-build-*/
+out/
+# CPM package cache
+.cpm/
+cpm/
+# Web UI
+webui/node_modules/
+webui/dist/
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
