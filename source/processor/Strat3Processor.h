@@ -4,8 +4,8 @@
 //
 // Threads:
 //   message   prepareToPlay / releaseResources / applyPendingConfig (re-prepare when
-//             global.latencyMode or sat.os changed; both change latency, so neither is
-//             automatable and neither is applied on the audio thread) / readImpact
+//             global.latencyMode, sat.os or the layer order changed; all change latency, so none is
+//             automatable and none is applied on the audio thread) / readImpact / setLayerOrder
 //   audio     processBlock / processBlockBypassed: atomics and the engine only
 //   analysis  analysisTick() at ~30 Hz; asks the message thread for a re-prepare when the
 //             config params changed
@@ -21,6 +21,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "analysis/ImpactAnalyser.h"
@@ -29,6 +30,10 @@
 #include "processor/ParamBridge.h"
 
 namespace strat3::processor {
+
+/** Layer IDs (EXTRA's layerOrder, stems included) -> engine order. Stems is skipped; anything
+ *  but an exact permutation of the processing layers gives the default. */
+engine::LayerOrder engineOrder (const std::vector<std::string>& ids);
 
 inline constexpr int kAnalysisHz = 30;
 inline constexpr float kCpuSmoothing = 0.1f;          // per block, one-pole on the load reading
@@ -73,7 +78,7 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     // ---- STRAT3
-    /** True when global.latencyMode or the requested sat.os differ from the prepared ones. */
+    /** True when global.latencyMode, the requested sat.os or the layer order differ from the prepared ones. */
     bool configPending() const noexcept;
     /** Message thread: re-prepare for a new mode / oversampling and report the new latency. */
     void applyPendingConfig();
@@ -86,6 +91,12 @@ public:
     void clearNonFiniteFlag() noexcept { nonFiniteLatched.store (false); }
     /** Message thread. Latest impact map (rows = engine::kRows). False if nothing new. */
     bool readImpact (analysis::ImpactFrame& out);
+
+    /** Message thread. Sanitised (all-or-nothing); stored in EXTRA; re-prepare requested. */
+    void setLayerOrder (const std::vector<std::string>& ids);
+    /** Message thread. The order in EXTRA (stems included). */
+    std::vector<std::string> layerOrder() const;
+    engine::LayerOrder preparedOrder() const noexcept;
 
     engine::LatencyMode preparedMode() const noexcept { return static_cast<engine::LatencyMode> (preparedModeIndex.load()); }
     int preparedSatOs() const noexcept { return preparedOs.load(); }
@@ -110,6 +121,7 @@ private:
 
     std::atomic<bool> prepared { false }, suspended { false }, inProcess { false }, monoLayout { false };
     std::atomic<int> preparedModeIndex { static_cast<int> (engine::LatencyMode::Mix) }, preparedOs { 2 };
+    std::atomic<int> requestedOrder { 0 }, preparedOrderCode { 0 };   // encodeOrder(): 3 bits per slot
     std::atomic<int> sidechainChannels { 0 };          // 0 (no bus), 1 or 2; fixed between prepares
 
     std::vector<float> scratchR;                        // mono: the engine's right channel

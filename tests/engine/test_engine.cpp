@@ -707,7 +707,7 @@ TEST_CASE ("engine: MASTER static EQ and crossovers change only through an off-t
     p.xover.f2 = 2000.0f;
     CHECK (requestDesigns (*e, p));
     sineGainDb (*e, 1000.0, 0.1f, 0.2);   // let the swap run
-    CHECK (strat3::dsp::activeCrossovers (e->domain).f2 == 2000.0f);
+    CHECK (strat3::dsp::activeCrossovers (bandDomain (*e, 0)).f2 == 2000.0f);
     auto mix = make (LatencyMode::Mix, p);
     CHECK_FALSE (requestDesigns (*mix, p));   // IIR modes never need a design
 }

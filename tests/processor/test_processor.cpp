@@ -1041,3 +1041,115 @@ TEST_CASE ("processor: re-prepare while the audio and analysis threads run", "[p
     CHECK_FALSE (nonFinite.load());
     p.reset();   // stops the analysis thread before the message manager goes
 }
+
+// ------------------------------------------------------------------- layer order (module 18)
+
+TEST_CASE ("processor: layer IDs map to the engine order; stems is skipped wherever it sits", "[processor][order]")
+{
+    const JuceScope juce;
+    using namespace engine;
+    CHECK (processor::engineOrder (params::defaultLayerOrder()) == kDefaultOrder);
+    CHECK (processor::engineOrder ({ "eq", "stems", "low", "mb", "width", "sat", "limit" }) == kDefaultOrder);
+    CHECK (processor::engineOrder ({ "limit", "sat", "width", "mb", "low", "eq", "stems" })
+           == LayerOrder { kLimit, kSat, kWidth, kMb, kLow, kEq });
+    // Not a permutation of the processing layers: the default (all-or-nothing, as in EXTRA).
+    CHECK (processor::engineOrder ({ "eq", "eq", "low", "mb", "width", "sat", "limit" }) == kDefaultOrder);
+    CHECK (processor::engineOrder ({ "eq", "low" }) == kDefaultOrder);
+    CHECK (processor::engineOrder ({ "low", "eq" }) == kDefaultOrder);   // a partial order is not applied either
+    CHECK (processor::engineOrder ({}) == kDefaultOrder);
+}
+
+TEST_CASE ("processor: a new layer order is pending until the message thread re-prepares", "[processor][order]")
+{
+    const JuceScope juce;
+    auto p = makeProc();
+    setParam (*p, "global.latencyMode", 2.0f);
+    p->prepareToPlay (kFs, 512);
+    const int before = p->getLatencySamples();
+    CHECK (p->preparedOrder() == engine::kDefaultOrder);
+    CHECK (engine::layerOrder (p->getEngine()) == engine::kDefaultOrder);
+
+    const std::vector<std::string> order { "stems", "mb", "eq", "width", "low", "sat", "limit" };
+    p->setLayerOrder (order);
+    CHECK (p->layerOrder() == order);
+    CHECK (params::decodeLayerOrder (p->extraState) == order);
+    CHECK (p->configPending());
+    CHECK (p->reprepareRequested());
+    CHECK (p->preparedOrder() == engine::kDefaultOrder);   // not yet
+
+    p->applyPendingConfig();
+    CHECK_FALSE (p->configPending());
+    const engine::LayerOrder expect { engine::kMb, engine::kEq, engine::kWidth, engine::kLow, engine::kSat, engine::kLimit };
+    CHECK (p->preparedOrder() == expect);
+    CHECK (engine::layerOrder (p->getEngine()) == expect);
+    CHECK (engine::bandDomainCount (p->getEngine()) == 3);
+    CHECK (p->getLatencySamples() == engine::latencySamples (p->getEngine()));
+    CHECK (p->getLatencySamples() > before + 2000);   // two extra FIR splits in MASTER
+}
+
+TEST_CASE ("processor: an invalid layer order is ignored", "[processor][order]")
+{
+    const JuceScope juce;
+    auto p = makeProc();
+    p->prepareToPlay (kFs, 512);
+    const std::vector<std::string> custom { "stems", "limit", "eq", "low", "mb", "width", "sat" };
+    p->setLayerOrder (custom);
+    p->applyPendingConfig();
+    const auto before = p->layerOrder();
+    REQUIRE (before == custom);
+    p->setLayerOrder ({ "eq", "eq", "low" });
+    CHECK (p->layerOrder() == before);
+    CHECK_FALSE (p->configPending());
+}
+
+TEST_CASE ("processor: a saved layer order comes back with the state", "[processor][order][state]")
+{
+    const JuceScope juce;
+    auto a = makeProc();
+    const std::vector<std::string> order { "stems", "limit", "eq", "low", "mb", "width", "sat" };
+    a->setLayerOrder (order);
+    juce::MemoryBlock blob;
+    a->getStateInformation (blob);
+
+    SECTION ("loaded before prepareToPlay")
+    {
+        auto b = makeProc();
+        b->setStateInformation (blob.getData(), static_cast<int> (blob.getSize()));
+        CHECK (b->layerOrder() == order);
+        b->prepareToPlay (kFs, 512);
+        CHECK (engine::layerOrder (b->getEngine())[0] == engine::kLimit);
+    }
+    SECTION ("loaded while prepared")
+    {
+        auto b = makeProc();
+        b->prepareToPlay (kFs, 512);
+        b->setStateInformation (blob.getData(), static_cast<int> (blob.getSize()));
+        CHECK (b->configPending());
+        CHECK (b->reprepareRequested());
+        b->applyPendingConfig();
+        CHECK (engine::layerOrder (b->getEngine())[0] == engine::kLimit);
+    }
+}
+
+TEST_CASE ("processor: the impact map rows follow the layer order", "[processor][order][analysis]")
+{
+    const JuceScope juce;
+    auto p = makeProc();
+    setParam (*p, "eq.on", 1.0f);
+    setParam (*p, "eq.b1.on", 1.0f);
+    setParam (*p, "eq.b1.freq", 1000.0f);
+    setParam (*p, "eq.b1.gain", 6.0f);
+    setParam (*p, "eq.b1.q", 1.0f);
+    p->setLayerOrder ({ "stems", "low", "mb", "width", "sat", "limit", "eq" });
+    p->prepareToPlay (kFs, 512);
+    const int eqRow = engine::rowOf (p->getEngine(), engine::kEq);
+    REQUIRE (eqRow == 6);
+    auto l = noise (3 * 48000, 0.05f, 51), r = noise (3 * 48000, 0.05f, 52);
+    runStereo (*p, l, r, 512, 3);
+
+    analysis::ImpactFrame frame;
+    REQUIRE (p->readImpact (frame));
+    constexpr int k1k = 34;
+    CHECK (frame.gainDb[static_cast<std::size_t> (eqRow)][k1k] == Approx (6.0f).margin (1.0));
+    CHECK (std::abs (frame.gainDb[1][k1k]) < 0.5f);   // LOW now sits where EQ used to
+}

@@ -11,6 +11,27 @@ namespace strat3::processor {
 
 using Set = juce::AudioChannelSet;
 
+namespace {
+
+// Order as one int (3 bits per slot), so the audio-free threads can compare it atomically.
+int encodeOrder (const engine::LayerOrder& o) noexcept
+{
+    int code = 0;
+    for (std::size_t i = 0; i < o.size(); ++i)
+        code |= static_cast<int> (o[i]) << (3 * i);
+    return code;
+}
+
+engine::LayerOrder decodeOrder (int code) noexcept
+{
+    engine::LayerOrder o {};
+    for (std::size_t i = 0; i < o.size(); ++i)
+        o[i] = static_cast<engine::DepthLayer> ((code >> (3 * i)) & 7);
+    return engine::isValidOrder (o) ? o : engine::kDefaultOrder;
+}
+
+} // namespace
+
 struct Strat3Processor::AnalysisThread final : juce::Thread
 {
     explicit AnalysisThread (Strat3Processor& o) : juce::Thread ("STRAT3 analysis"), owner (o) {}
@@ -39,6 +60,8 @@ Strat3Processor::Strat3Processor (bool runThread)
       impact (std::make_unique<analysis::ImpactAnalyser>()),
       runAnalysisThread (runThread)
 {
+    requestedOrder.store (encodeOrder (engineOrder (params::decodeLayerOrder (extraState))));
+    preparedOrderCode.store (requestedOrder.load());
     if (runAnalysisThread)
     {
         analysisThread = std::make_unique<AnalysisThread> (*this);
@@ -125,6 +148,7 @@ void Strat3Processor::prepareEngine (double sampleRate, int maxBlock)
         cfg.maxBlock = maxBlock;
         cfg.mode = readLatencyMode (params);
         cfg.satOs = readSatOs (params);
+        cfg.order = decodeOrder (requestedOrder.load());
         engine::prepare (*engine, cfg, readParams (params, mono));
         config = engine->config;   // sanitised rate and block size
         config.satOs = cfg.satOs;  // keep the requested factor: pending compares against it
@@ -151,6 +175,7 @@ void Strat3Processor::prepareEngine (double sampleRate, int maxBlock)
 
         preparedModeIndex.store (static_cast<int> (cfg.mode));
         preparedOs.store (cfg.satOs);
+        preparedOrderCode.store (encodeOrder (engine::layerOrder (*engine)));
         prepared.store (true);
         resumeAudio();
     }
@@ -159,7 +184,8 @@ void Strat3Processor::prepareEngine (double sampleRate, int maxBlock)
 
 bool Strat3Processor::configPending() const noexcept
 {
-    return readLatencyMode (params) != preparedMode() || readSatOs (params) != preparedOs.load();
+    return readLatencyMode (params) != preparedMode() || readSatOs (params) != preparedOs.load()
+        || requestedOrder.load() != preparedOrderCode.load();
 }
 
 void Strat3Processor::applyPendingConfig()
@@ -337,8 +363,45 @@ void Strat3Processor::setStateInformation (const void* data, int sizeInBytes)
         return;
     apvts.replaceState (tree);
     extraState = params::unwrapExtra (*migrated);
+    requestedOrder.store (encodeOrder (engineOrder (params::decodeLayerOrder (extraState))));
     if (prepared.load() && configPending())
         triggerAsyncUpdate();
 }
+
+// ------------------------------------------------------------------- layer order
+
+engine::LayerOrder engineOrder (const std::vector<std::string>& ids)
+{
+    // Same all-or-nothing rule as EXTRA: a partly valid order would silently reroute the chain.
+    if (params::sanitiseLayerOrder (ids) != ids)
+        return engine::kDefaultOrder;
+    engine::LayerOrder out = engine::kDefaultOrder;
+    std::size_t slot = 0;
+    for (const auto& id : ids)
+    {
+        static const std::array<std::pair<const char*, engine::DepthLayer>, engine::kDepthLayers> names {
+            { { "eq", engine::kEq }, { "low", engine::kLow }, { "mb", engine::kMb },
+              { "width", engine::kWidth }, { "sat", engine::kSat }, { "limit", engine::kLimit } } };
+        for (const auto& [name, layer] : names)
+            if (id == name && slot < out.size())
+                out[slot++] = layer;   // "stems" matches nothing: skipped
+    }
+    return engine::isValidOrder (out) ? out : engine::kDefaultOrder;
+}
+
+
+void Strat3Processor::setLayerOrder (const std::vector<std::string>& ids)
+{
+    if (params::sanitiseLayerOrder (ids) != ids)
+        return;   // not a permutation: keep the current order
+    extraState = params::withLayerOrder (extraState, ids);
+    requestedOrder.store (encodeOrder (engineOrder (ids)));
+    if (prepared.load() && configPending())
+        triggerAsyncUpdate();
+}
+
+std::vector<std::string> Strat3Processor::layerOrder() const { return params::decodeLayerOrder (extraState); }
+
+engine::LayerOrder Strat3Processor::preparedOrder() const noexcept { return decodeOrder (preparedOrderCode.load()); }
 
 } // namespace strat3::processor

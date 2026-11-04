@@ -1,8 +1,13 @@
 #pragma once
 // The fixed-order chain that wires every layer (headless: no AudioProcessor types).
 //
-//   IN TRIM -> EQ -> LOW -> [MB -> WIDTH -> SAT, one shared band split] -> LIMIT -> OUT TRIM
+//   IN TRIM -> six depth layers in EngineConfig::order -> OUT TRIM
 //   -> monitor (normal | delta) -> CEILING -> gain match (monitor only)
+//   default order: EQ -> LOW -> [MB -> WIDTH -> SAT, one shared band split] -> LIMIT
+//
+// Order (Phase 5 rule): neighbouring band layers (MB, WIDTH, SAT) share one split, a band
+// domain; a broadband layer between them starts another. Each domain adds its split latency
+// (MASTER: one FIR, ~52 ms), so the order is part of the prepared config, not a parameter.
 //
 // Depth: each layer has its own DepthBlend. LOW, SAT and LIMIT return a reference (their
 // all-pass / oversampler / look-ahead path, unprocessed) and blend against it; EQ blends
@@ -51,7 +56,8 @@ enum class LatencyMode { Track, Mix, Master };   // global.latencyMode order: ap
 /** Layers with a depth handle, in chain order. */
 enum DepthLayer { kEq, kLow, kMb, kWidth, kSat, kLimit, kDepthLayers };
 
-/** Impact-map rows (one per stage, trims included); tap r is a row's input, r + 1 its output. */
+/** Impact-map rows (one per stage, trims included); tap r is a row's input, r + 1 its output.
+ *  Rows are chain positions: the layer names below are the default order. Use rowOf(). */
 enum Row { kRowInTrim, kRowEq, kRowLow, kRowMb, kRowWidth, kRowSat, kRowLimit, kRowOutTrim, kRowCeiling, kRows };
 
 inline constexpr float kTrimRampMs = 20.0f;          // Phase 5: trims smoothed over 20 ms
@@ -91,12 +97,35 @@ struct EngineParams
     bool operator== (const EngineParams&) const = default;
 };
 
+/** Chain order of the depth layers (IN TRIM before, OUT TRIM and CEILING after, always). */
+using LayerOrder = std::array<DepthLayer, kDepthLayers>;
+inline constexpr LayerOrder kDefaultOrder { kEq, kLow, kMb, kWidth, kSat, kLimit };
+/** Neighbouring band layers share one split (a band domain); at most three runs fit in six. */
+inline constexpr int kMaxBandDomains = 3;
+
+inline constexpr bool isBandLayer (DepthLayer k) noexcept { return k == kMb || k == kWidth || k == kSat; }
+
+/** True for an exact permutation of the six depth layers. */
+inline bool isValidOrder (const LayerOrder& o) noexcept
+{
+    std::array<bool, kDepthLayers> seen {};
+    for (auto k : o)
+    {
+        const auto i = static_cast<std::size_t> (k);
+        if (k < 0 || k >= kDepthLayers || seen[i])
+            return false;
+        seen[i] = true;
+    }
+    return true;
+}
+
 struct EngineConfig
 {
     double sampleRate = 48000.0;
     int maxBlock = 512;
     LatencyMode mode = LatencyMode::Mix;
     int satOs = 2;   // requested factor (1, 2, 4); capped by effectiveSatOs
+    LayerOrder order = kDefaultOrder;   // not a permutation: prepare() uses kDefaultOrder
 };
 
 /** Not copyable or movable (atomics in the FIR swaps and taps): construct in place. */
@@ -109,7 +138,7 @@ struct Engine
     dsp::EqLayer eqIir {};
     dsp::FirEq eqFir {};
     dsp::LowLayer low {};
-    dsp::BandDomain domain {};
+    std::array<dsp::BandDomain, kMaxBandDomains> domains {};   // [0, domainCount) in use
     dsp::SidechainSplit sidechain {};
     dsp::CrossoverPoints sidechainPoints = dsp::kDefaultCrossovers;
     dsp::MultibandLayer mb {};
@@ -133,8 +162,12 @@ struct Engine
     std::atomic<float> gainMatchTargetDb { 0.0f };
     std::atomic<bool> nonFinite { false };
 
-    // ---- latency
-    std::array<int, kRows> rows {};
+    // ---- order and latency
+    LayerOrder order = kDefaultOrder;
+    std::array<int, kDepthLayers> domainOf {};    // per chain slot: band domain, -1 broadband
+    std::array<int, kDepthLayers> slotOf {};      // per layer: chain slot
+    int domainCount = 1, mbDomain = 0;
+    std::array<int, kRows> rows {};               // per chain position: 0 IN TRIM, 1 + slot, 7, 8
     int satOs = 1;
 
     // ---- analysis taps (consumers: the analysis thread)
@@ -144,7 +177,7 @@ struct Engine
     // ---- background designer's view (owned by the requestDesigns thread)
     dsp::EqSettings designedEq {};
     float designedPhase = 100.0f;
-    dsp::CrossoverPoints designedXover = dsp::kDefaultCrossovers;
+    std::array<dsp::CrossoverPoints, kMaxBandDomains> designedXover { dsp::kDefaultCrossovers, dsp::kDefaultCrossovers, dsp::kDefaultCrossovers };
 };
 
 namespace enginedetail {
@@ -209,11 +242,11 @@ inline void snapRamp (dsp::LinearRamp& r) noexcept
 inline void setMonitorTargets (Engine& e) noexcept
 {
     const auto& p = e.params;
-    int top = -1;
-    for (int i = 0; i < kDepthLayers; ++i)
-        if (p.layer[static_cast<std::size_t> (i)].delta)
+    int top = -1;   // "topmost" = first in the chain
+    for (auto k : e.order)
+        if (p.layer[static_cast<std::size_t> (k)].delta)
         {
-            top = i;
+            top = k;
             break;
         }
     const bool global = top < 0 && p.globalDelta;   // a layer's own delta is more specific
@@ -230,8 +263,9 @@ inline void resetNonFinite (Engine& e) noexcept
 {
     dsp::resetIfNotFinite (e.eqIir);
     dsp::resetIfNotFinite (e.low);
-    for (auto& s : e.domain.iir)
-        dsp::resetIfNotFinite (s);
+    for (int d = 0; d < e.domainCount; ++d)
+        for (auto& s : e.domains[static_cast<std::size_t> (d)].iir)
+            dsp::resetIfNotFinite (s);
     dsp::resetIfNotFinite (e.sidechain);
     dsp::resetIfNotFinite (e.mb);
     dsp::resetIfNotFinite (e.width);
@@ -247,13 +281,17 @@ inline void resetNonFinite (Engine& e) noexcept
     auto& eqActive = dsp::activeSlot (e.eqFir.swap);
     for (auto& c : eqActive.conv)
         dsp::reset (c);
-    for (auto& c : dsp::activeSlot (e.domain.fir).ch)
-        dsp::reset (c);
+    for (int d = 0; d < e.domainCount; ++d)
+    {
+        auto& dom = e.domains[static_cast<std::size_t> (d)];
+        for (auto& c : dsp::activeSlot (dom.fir).ch)
+            dsp::reset (c);
+        if (dsp::isSwapping (dom.fir))
+            for (auto& c : dom.fir.slots[static_cast<std::size_t> (1 - dom.fir.active)].ch)
+                dsp::reset (c);
+    }
     if (dsp::isSwapping (e.eqFir.swap))
         for (auto& c : e.eqFir.swap.slots[static_cast<std::size_t> (1 - e.eqFir.swap.active)].conv)
-            dsp::reset (c);
-    if (dsp::isSwapping (e.domain.fir))
-        for (auto& c : e.domain.fir.slots[static_cast<std::size_t> (1 - e.domain.fir.active)].ch)
             dsp::reset (c);
 
     auto sanitiseAll = [] (auto& lines) { for (auto& d : lines) dsp::sanitise (d); };
@@ -271,8 +309,9 @@ inline void flushDenormals (Engine& e) noexcept
 {
     dsp::flushDenormals (e.eqIir);
     dsp::flushDenormals (e.low);
-    for (auto& s : e.domain.iir)
-        dsp::flushDenormals (s);
+    for (int d = 0; d < e.domainCount; ++d)
+        for (auto& s : e.domains[static_cast<std::size_t> (d)].iir)
+            dsp::flushDenormals (s);
     dsp::flushDenormals (e.sidechain);
     dsp::flushDenormals (e.mb);
     dsp::flushDenormals (e.width);
@@ -299,6 +338,17 @@ inline std::array<int, kRows> rowLatencies (const Engine& e) noexcept { return e
 
 inline int effectiveSatOs (const Engine& e) noexcept { return e.satOs; }
 
+/** The prepared chain order (kDefaultOrder if the config's order was not a permutation). */
+inline LayerOrder layerOrder (const Engine& e) noexcept { return e.order; }
+/** Number of band splits the order needs (1 to 3). */
+inline int bandDomainCount (const Engine& e) noexcept { return e.domainCount; }
+/** Impact-map row of a layer: 1 + its chain slot. */
+inline int rowOf (const Engine& e, DepthLayer k) noexcept { return 1 + e.slotOf[static_cast<std::size_t> (k)]; }
+inline const dsp::BandDomain& bandDomain (const Engine& e, int d) noexcept
+{
+    return e.domains[static_cast<std::size_t> (std::clamp (d, 0, e.domainCount - 1))];
+}
+
 /** Audio thread, once per block before process(). Never allocates. */
 inline void setParams (Engine& e, const EngineParams& in) noexcept
 {
@@ -308,8 +358,9 @@ inline void setParams (Engine& e, const EngineParams& in) noexcept
 
     dsp::setBands (e.eqIir, iirBands (p.eq, e.config.mode));
     dsp::setSettings (e.low, p.low);
-    dsp::setIirCrossovers (e.domain, p.xover);   // FIR mode: no-op, the designer handles it
-    const auto points = dsp::activeCrossovers (e.domain);
+    for (int d = 0; d < e.domainCount; ++d)   // FIR mode: no-op, the designer handles it
+        dsp::setIirCrossovers (e.domains[static_cast<std::size_t> (d)], p.xover);
+    const auto points = dsp::activeCrossovers (e.domains[static_cast<std::size_t> (e.mbDomain)]);
     if (points.f1 != e.sidechainPoints.f1 || points.f2 != e.sidechainPoints.f2 || points.f3 != e.sidechainPoints.f3)
     {
         e.sidechainPoints = points;
@@ -361,30 +412,68 @@ inline void prepare (Engine& e, const EngineConfig& cfg, const EngineParams& p)
         e.eqFir.prepared = false;   // process() then passes and latencySamples() reports 0
     e.designedEq = p.eq;
     e.designedPhase = p.eqPhase;
-    e.designedXover = p.xover;
+    // ---- order -> band domains
+    e.order = isValidOrder (cfg.order) ? cfg.order : kDefaultOrder;
+    e.config.order = e.order;
+    e.domainCount = 0;
+    for (std::size_t s = 0; s < kDepthLayers; ++s)
+    {
+        const auto k = e.order[s];
+        e.slotOf[static_cast<std::size_t> (k)] = static_cast<int> (s);
+        if (! isBandLayer (k))
+        {
+            e.domainOf[s] = -1;
+            continue;
+        }
+        if (s == 0 || ! isBandLayer (e.order[s - 1]))
+            ++e.domainCount;
+        e.domainOf[s] = e.domainCount - 1;
+        if (k == kMb)
+            e.mbDomain = e.domainOf[s];
+    }
+    for (int d = 0; d < e.domainCount; ++d)
+    {
+        const auto i = static_cast<std::size_t> (d);
+        dsp::prepare (e.domains[i], master ? dsp::SplitMode::Fir : dsp::SplitMode::Iir, p.xover, fs);
+        e.designedXover[i] = p.xover;
+    }
+    const int splitLatency = dsp::latencySamples (e.domains[0]);   // every domain is the same split
 
     dsp::prepare (e.low, fs);
-    dsp::prepare (e.domain, master ? dsp::SplitMode::Fir : dsp::SplitMode::Iir, p.xover, fs);
-    const int domainLatency = dsp::latencySamples (e.domain);
-    // The sidechain must meet the main bands at MB: the main path is late by the FIR EQ and
-    // the FIR split (MASTER), the sidechain only by this delay.
-    const int sidechainDelay = dsp::latencySamples (e.eqFir) + domainLatency;
-    e.sidechainPoints = dsp::activeCrossovers (e.domain);
-    dsp::prepare (e.sidechain, e.sidechainPoints, fs, sidechainDelay);
-    dsp::setDelay (e.sidechain, sidechainDelay);
     dsp::prepare (e.mb, fs);
     dsp::prepare (e.width, fs);
     dsp::prepare (e.sat, fs, e.satOs, master ? dsp::OsKind::Fir : dsp::OsKind::Iir);
     dsp::prepare (e.limit, fs, dsp::kLimitLookaheadMs[modeIndex]);
     dsp::prepare (e.ceiling, fs, e.config.mode != LatencyMode::Track);
 
+    // ---- rows: what each chain position adds; a split counts at the head of its run
     e.rows = {};
-    e.rows[kRowEq] = dsp::latencySamples (e.eqFir);
-    e.rows[kRowMb] = domainLatency;   // the split sits at the head of the band domain
-    e.rows[kRowSat] = dsp::latencySamples (e.sat);
-    e.rows[kRowLimit] = dsp::latencySamples (e.limit);
+    for (std::size_t s = 0; s < kDepthLayers; ++s)
+    {
+        int lat = 0;
+        switch (e.order[s])
+        {
+            case kEq:    lat = dsp::latencySamples (e.eqFir); break;
+            case kSat:   lat = dsp::latencySamples (e.sat); break;
+            case kLimit: lat = dsp::latencySamples (e.limit); break;
+            case kLow: case kMb: case kWidth: case kDepthLayers: break;
+        }
+        const int d = e.domainOf[s];
+        if (d >= 0 && (s == 0 || e.domainOf[s - 1] != d))
+            lat += splitLatency;
+        e.rows[1 + s] = lat;
+    }
     e.rows[kRowCeiling] = dsp::latencySamples (e.ceiling);
     const int total = latencySamples (e);
+
+    // The sidechain must meet the main bands at MB's input: everything up to and including
+    // MB's row (MB itself adds nothing; its row holds the split when MB heads the run).
+    int sidechainDelay = 0;
+    for (int s = 0; s <= e.slotOf[kMb]; ++s)
+        sidechainDelay += e.rows[static_cast<std::size_t> (1 + s)];
+    e.sidechainPoints = dsp::activeCrossovers (e.domains[static_cast<std::size_t> (e.mbDomain)]);
+    dsp::prepare (e.sidechain, e.sidechainPoints, fs, sidechainDelay);
+    dsp::setDelay (e.sidechain, sidechainDelay);
 
     for (auto* b : { &e.eqBlend, &e.lowBlend, &e.limitBlend })
         dsp::prepare (*b, fs, 0);   // dry arrives aligned (delayed input or a reference)
@@ -392,31 +481,26 @@ inline void prepare (Engine& e, const EngineConfig& cfg, const EngineParams& p)
         dsp::prepare (*b, fs, 0);
     for (auto& d : e.eqDry)
     {
-        dsp::prepare (d, static_cast<std::size_t> (e.rows[kRowEq]));
-        dsp::setDelay (d, static_cast<std::size_t> (e.rows[kRowEq]));
+        dsp::prepare (d, static_cast<std::size_t> (dsp::latencySamples (e.eqFir)));
+        dsp::setDelay (d, static_cast<std::size_t> (dsp::latencySamples (e.eqFir)));
     }
     for (auto& d : e.ceilingBypass)
     {
         dsp::prepare (d, static_cast<std::size_t> (e.rows[kRowCeiling]));
         dsp::setDelay (d, static_cast<std::size_t> (e.rows[kRowCeiling]));
     }
-    // From each layer's output to the monitor point (after LIMIT).
-    const int afterSat = e.rows[kRowLimit];
-    const int afterDomainHead = e.rows[kRowSat] + afterSat;
-    const std::array<int, kDepthLayers> toMonitor {
-        domainLatency + afterDomainHead,   // EQ
-        domainLatency + afterDomainHead,   // LOW
-        afterDomainHead,                   // MB
-        afterDomainHead,                   // WIDTH
-        afterSat,                          // SAT
-        0                                  // LIMIT
-    };
-    for (std::size_t i = 0; i < kDepthLayers; ++i)
-        for (auto& d : e.deltaDelay[i])
+    // From each layer's output to the monitor point (after the last layer).
+    for (std::size_t k = 0; k < kDepthLayers; ++k)
+    {
+        int toMonitor = 0;
+        for (int s = e.slotOf[k] + 1; s < kDepthLayers; ++s)
+            toMonitor += e.rows[static_cast<std::size_t> (1 + s)];
+        for (auto& d : e.deltaDelay[k])
         {
             dsp::prepare (d, static_cast<std::size_t> (std::max (1, total)));
-            dsp::setDelay (d, static_cast<std::size_t> (toMonitor[i]));
+            dsp::setDelay (d, static_cast<std::size_t> (toMonitor));
         }
+    }
 
     analysis::prepare (e.capture, kRows + 1);
     analysis::prepare (e.loudIn, fs);
@@ -468,13 +552,16 @@ inline bool requestDesigns (Engine& e, const EngineParams& p)
             e.designedPhase = p.eqPhase;
             made = true;
         }
-    const auto& x = p.xover;
-    if (x.f1 != e.designedXover.f1 || x.f2 != e.designedXover.f2 || x.f3 != e.designedXover.f3)
-        if (dsp::designStandby (e.domain, x))
+    // Every split gets the same points; each swaps on its own, so each keeps its own record.
+    for (int d = 0; d < e.domainCount; ++d)
+    {
+        const auto i = static_cast<std::size_t> (d);
+        if (p.xover != e.designedXover[i] && dsp::designStandby (e.domains[i], p.xover))
         {
-            e.designedXover = x;
+            e.designedXover[i] = p.xover;
             made = true;
         }
+    }
     return made;
 }
 
@@ -511,7 +598,8 @@ inline void process (Engine& e, float* l, float* r, int numSamples,
 
     setMonitorTargets (e);   // picks up a new gain-match offset without a setParams
     dsp::beginBlock (e.eqFir);
-    dsp::beginBlock (e.domain);
+    for (int d = 0; d < e.domainCount; ++d)
+        dsp::beginBlock (e.domains[static_cast<std::size_t> (d)]);
     analysis::beginBlock (e.capture, numSamples);
     const bool external = e.params.mb.sidechain == dsp::MbSidechain::External
                        && sidechainL != nullptr && sidechainR != nullptr;
@@ -536,69 +624,94 @@ inline void process (Engine& e, float* l, float* r, int numSamples,
             diff[static_cast<std::size_t> (k)] = { out[0] - dry[0], out[1] - dry[1] };
         };
 
-        // ---- EQ (MASTER: static bands in the FIR, dynamic nodes in the IIR after it)
-        const float eqDry[2] { dsp::process (e.eqDry[0], x[0]), dsp::process (e.eqDry[1], x[1]) };
-        float eqWet[2] { x[0], x[1] };
-        dsp::process (e.eqFir, eqWet[0], eqWet[1]);
-        dsp::process (e.eqIir, eqWet[0], eqWet[1]);
-        float y[2];
-        dsp::process (e.eqBlend, eqDry, eqWet, y);
-        diff2 (kEq, y, eqDry);
-        tap (2, y[0], y[1]);
-
-        // ---- LOW
-        const auto lf = dsp::process (e.low, y[0], y[1]);
-        const float lowDry[2] { lf.refL, lf.refR }, lowWet[2] { lf.l, lf.r };
-        dsp::process (e.lowBlend, lowDry, lowWet, y);
-        diff2 (kLow, y, lowDry);
-        tap (3, y[0], y[1]);
-
-        // ---- band domain: MB -> WIDTH -> SAT
-        float dry8[8], wet8[8], out8[8], dl, dr, ol, orr;
-        auto bands = dsp::split (e.domain, y[0], y[1]);
-        pack (bands, dry8);
-        dsp::StereoBands scBands;
-        const dsp::StereoBands* sc = nullptr;
-        if (external)
+        // ---- the six depth layers, in the prepared order. A band run is split at its first
+        // layer; each band layer's output is summed for its tap, delta and (at the end of
+        // the run) the next broadband layer.
+        float y[2] { x[0], x[1] };
+        dsp::StereoBands bands {};
+        for (std::size_t s = 0; s < kDepthLayers; ++s)
         {
-            scBands = dsp::process (e.sidechain, finiteOr0 (sidechainL[i]), finiteOr0 (sidechainR[i]));
-            sc = &scBands;
+            const auto k = e.order[s];
+            const int d = e.domainOf[s];
+            float dry8[8], wet8[8], out8[8];
+            if (d >= 0 && (s == 0 || e.domainOf[s - 1] != d))
+                bands = dsp::split (e.domains[static_cast<std::size_t> (d)], y[0], y[1]);
+
+            switch (k)
+            {
+                case kEq:
+                {
+                    // MASTER: static bands in the FIR, dynamic nodes in the IIR after it
+                    const float eqDry[2] { dsp::process (e.eqDry[0], y[0]), dsp::process (e.eqDry[1], y[1]) };
+                    float eqWet[2] { y[0], y[1] };
+                    dsp::process (e.eqFir, eqWet[0], eqWet[1]);
+                    dsp::process (e.eqIir, eqWet[0], eqWet[1]);
+                    dsp::process (e.eqBlend, eqDry, eqWet, y);
+                    diff2 (kEq, y, eqDry);
+                    break;
+                }
+                case kLow:
+                {
+                    const auto lf = dsp::process (e.low, y[0], y[1]);
+                    const float lowDry[2] { lf.refL, lf.refR }, lowWet[2] { lf.l, lf.r };
+                    dsp::process (e.lowBlend, lowDry, lowWet, y);
+                    diff2 (kLow, y, lowDry);
+                    break;
+                }
+                case kLimit:
+                {
+                    const auto lim = dsp::process (e.limit, y[0], y[1]);
+                    const float limDry[2] { lim.refL, lim.refR }, limWet[2] { lim.l, lim.r };
+                    dsp::process (e.limitBlend, limDry, limWet, y);
+                    diff2 (kLimit, y, limDry);
+                    break;
+                }
+                case kMb:
+                {
+                    pack (bands, dry8);
+                    dsp::StereoBands scBands;
+                    const dsp::StereoBands* sc = nullptr;
+                    if (external)
+                    {
+                        scBands = dsp::process (e.sidechain, finiteOr0 (sidechainL[i]), finiteOr0 (sidechainR[i]));
+                        sc = &scBands;
+                    }
+                    dsp::process (e.mb, bands, sc);
+                    pack (bands, wet8);
+                    dsp::process (e.mbBlend, dry8, wet8, out8);
+                    break;
+                }
+                case kWidth:
+                {
+                    pack (bands, dry8);
+                    dsp::process (e.width, bands);
+                    pack (bands, wet8);
+                    dsp::process (e.widthBlend, dry8, wet8, out8);
+                    break;
+                }
+                case kSat:
+                {
+                    dsp::StereoBands ref;
+                    dsp::process (e.sat, bands, ref);
+                    pack (ref, dry8);
+                    pack (bands, wet8);
+                    dsp::process (e.satBlend, dry8, wet8, out8);
+                    break;
+                }
+                case kDepthLayers:
+                    break;
+            }
+
+            if (d >= 0)
+            {
+                float dl, dr;
+                sum (out8, y[0], y[1]);
+                sum (dry8, dl, dr);
+                diff[static_cast<std::size_t> (k)] = { y[0] - dl, y[1] - dr };
+                bands = unpack (out8);
+            }
+            tap (static_cast<int> (s) + 2, y[0], y[1]);
         }
-        dsp::process (e.mb, bands, sc);
-        pack (bands, wet8);
-        dsp::process (e.mbBlend, dry8, wet8, out8);
-        sum (out8, ol, orr);
-        sum (dry8, dl, dr);
-        diff[kMb] = { ol - dl, orr - dr };
-        tap (4, ol, orr);
-
-        std::copy (out8, out8 + 8, dry8);
-        bands = unpack (dry8);
-        dsp::process (e.width, bands);
-        pack (bands, wet8);
-        dsp::process (e.widthBlend, dry8, wet8, out8);
-        sum (out8, ol, orr);
-        sum (dry8, dl, dr);
-        diff[kWidth] = { ol - dl, orr - dr };
-        tap (5, ol, orr);
-
-        bands = unpack (out8);
-        dsp::StereoBands ref;
-        dsp::process (e.sat, bands, ref);
-        pack (ref, dry8);
-        pack (bands, wet8);
-        dsp::process (e.satBlend, dry8, wet8, out8);
-        sum (out8, ol, orr);
-        sum (dry8, dl, dr);
-        diff[kSat] = { ol - dl, orr - dr };
-        tap (6, ol, orr);
-
-        // ---- LIMIT
-        const auto lim = dsp::process (e.limit, ol, orr);
-        const float limDry[2] { lim.refL, lim.refR }, limWet[2] { lim.l, lim.r };
-        dsp::process (e.limitBlend, limDry, limWet, y);
-        diff2 (kLimit, y, limDry);
-        tap (7, y[0], y[1]);
 
         // ---- monitor: normal, one layer's delta, or the sum of all of them
         const float gN = step (e.normalGain), gG = step (e.globalGain);
