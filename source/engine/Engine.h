@@ -66,6 +66,7 @@ struct LayerSwitch
     bool on = true;
     float depth = 100.0f;   // 0..150 %
     bool delta = false;
+    bool operator== (const LayerSwitch&) const = default;
 };
 
 /** Everything the audio thread needs, already converted from parameter values. Plain data:
@@ -87,6 +88,7 @@ struct EngineParams
     dsp::SatSettings sat {};
     dsp::LimitSettings limit {};       // ceilingDb is ignored: it follows ceiling.ceilingDb
     dsp::CeilingSettings ceiling {};
+    bool operator== (const EngineParams&) const = default;
 };
 
 struct EngineConfig

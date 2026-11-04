@@ -52,6 +52,7 @@ struct LowSettings
     float tight = 0.0f;     // 0..100 %
     bool monoOn = false;
     float monoHz = 100.0f;
+    bool operator== (const LowSettings&) const = default;
 };
 
 /** Running maximum over the last `window` samples (monotonic deque in a fixed ring).

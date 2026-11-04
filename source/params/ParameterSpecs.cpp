@@ -165,7 +165,8 @@ void addSaturate (std::vector<ParamSpec>& out)
         out.push_back (flt (base + ".drive", label + " Drive", 0.0f, 24.0f, 0.0f, "dB"));
         out.push_back (flt (base + ".mix", label + " Mix", 0.0f, 100.0f, 100.0f, "%"));
     }
-    out.push_back (choice ("sat.os", "Saturate Oversampling", { "1x", "2x", "4x" }, 1));
+    // Changes latency (re-prepare on the message thread), so never automatable.
+    out.push_back (monitorOnly (choice ("sat.os", "Saturate Oversampling", { "1x", "2x", "4x" }, 1)));
 }
 
 void addLimit (std::vector<ParamSpec>& out)

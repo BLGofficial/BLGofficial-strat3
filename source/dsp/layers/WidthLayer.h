@@ -36,6 +36,7 @@ struct WidthSettings
     std::array<float, 4> widthPercent {};   // -100..100
     float stereoizePercent = 0.0f;          // 0..100
     bool monoGuard = true;
+    bool operator== (const WidthSettings&) const = default;
 };
 
 struct WidthBandState

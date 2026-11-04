@@ -109,7 +109,8 @@ TEST_CASE ("only monitoring and latency-changing params are non-automatable", "[
     {
         INFO (s.id);
         const bool isDelta   = s.id.ends_with (".delta");
-        const bool isLatency = s.id == "global.latencyMode";
+        // sat.os changes the oversampler latency: automating it would move host PDC mid-play.
+        const bool isLatency = s.id == "global.latencyMode" || s.id == "sat.os";
         const bool isMonitor = s.id == "global.gainMatch" || s.id == "global.delta";
         CHECK (s.automatable == ! (isDelta || isLatency || isMonitor));
     }

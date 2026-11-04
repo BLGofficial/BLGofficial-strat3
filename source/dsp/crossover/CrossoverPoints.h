@@ -10,6 +10,7 @@ namespace strat3::dsp {
 struct CrossoverPoints
 {
     float f1 = 120.0f, f2 = 1000.0f, f3 = 5000.0f;
+    bool operator== (const CrossoverPoints&) const = default;
 };
 
 inline constexpr CrossoverPoints kDefaultCrossovers { 120.0f, 1000.0f, 5000.0f };
