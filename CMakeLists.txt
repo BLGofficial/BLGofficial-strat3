@@ -28,10 +28,13 @@ CPMAddPackage(NAME JUCE
     SYSTEM YES)   # treat JUCE headers as system so our strict warnings only report our code
 
 if(STRAT3_BUILD_PLUGIN)
+    # Pinned to a main commit, not a tag: the last release (0.26.0) includes
+    # juce_LegacyAudioParameter.cpp, which JUCE 8.0.11+ moved to juce_audio_processors_headless.
+    # Move back to a tag once one ships with that fix.
     CPMAddPackage(NAME clap-juce-extensions
         GIT_REPOSITORY https://github.com/free-audio/clap-juce-extensions.git
-        GIT_TAG 0.26.0
-        GIT_SHALLOW ON)
+        GIT_TAG 7adee3a1bd4684d4caa5601100e364abccff4b4d
+        GIT_SHALLOW OFF)   # a shallow fetch needs a branch or tag name
 endif()
 
 # ---------------------------------------------------------------- warnings
