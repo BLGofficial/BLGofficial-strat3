@@ -1,4 +1,5 @@
 #include "processor/Strat3Processor.h"
+#include "ui/Strat3Editor.h"
 
 #include <algorithm>
 #include <chrono>
@@ -12,6 +13,18 @@ namespace strat3::processor {
 using Set = juce::AudioChannelSet;
 
 namespace {
+
+void raise (std::atomic<float>& hold, float v) noexcept
+{
+    if (v > hold.load (std::memory_order_relaxed))   // single writer: no CAS needed
+        hold.store (v, std::memory_order_relaxed);
+}
+
+float toMeterDb (float gain) noexcept
+{
+    return gain > 0.0f ? std::max (kMeterFloorDb, 20.0f * std::log10 (gain)) : kMeterFloorDb;
+}
+
 
 // Order as one int (3 bits per slot), so the audio-free threads can compare it atomically.
 int encodeOrder (const engine::LayerOrder& o) noexcept
@@ -172,6 +185,7 @@ void Strat3Processor::prepareEngine (double sampleRate, int maxBlock)
             m->store (-100.0f);
         gainMatchOffset.store (0.0f);
         cpuLoad.store (0.0f);
+        resetMeters();
 
         preparedModeIndex.store (static_cast<int> (cfg.mode));
         preparedOs.store (cfg.satOs);
@@ -255,6 +269,7 @@ void Strat3Processor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         engine::process (*engine, cl, cr, len,
                          scL != nullptr ? scL + off : nullptr,
                          scR != nullptr ? scR + off : nullptr);
+        publishMeters (engine::blockMeters (*engine));
     }
 
     if (engine::takeNonFiniteFlag (*engine))
@@ -326,7 +341,61 @@ Meters Strat3Processor::meters() const noexcept
     m.gainMatchDb = gainMatchOffset.load();
     m.cpuLoad = cpuLoad.load();
     m.nonFinite = nonFiniteLatched.load();
+    m.correlation = outCorrelation.load();
+    m.truePeakMaxDb = toMeterDb (tpProgramMax.load());
+    if (m.truePeakMaxDb > kMeterFloorDb && m.integratedLufs > kMeterFloorDb)
+        m.plr = analysis::peakToLoudnessRatio (m.truePeakMaxDb, m.integratedLufs);
     return m;
+}
+
+
+void Strat3Processor::publishMeters (const engine::BlockMeters& b) noexcept
+{
+    for (std::size_t c = 0; c < 2; ++c)
+    {
+        raise (inPeakHold[c], b.inPeak[c]);
+        raise (outPeakHold[c], b.outPeak[c]);
+    }
+    raise (outTpHold, b.outTruePeak);
+    raise (tpProgramMax, b.outTruePeak);
+    raise (grHold, -b.grDb);   // held as a positive amount of reduction
+    if (std::isfinite (b.correlation))
+        outCorrelation.store (b.correlation, std::memory_order_relaxed);
+    if (std::max (b.inPeak[0], b.inPeak[1]) >= 1.0f)
+        inClipLatched.store (true, std::memory_order_relaxed);
+    if (b.outTruePeak > 1.0f)
+        outClipLatched.store (true, std::memory_order_relaxed);
+}
+
+void Strat3Processor::resetMeters() noexcept
+{
+    for (auto* h : { &inPeakHold[0], &inPeakHold[1], &outPeakHold[0], &outPeakHold[1], &outTpHold, &grHold, &tpProgramMax })
+        h->store (0.0f);
+    outCorrelation.store (1.0f);
+    inClipLatched.store (false);
+    outClipLatched.store (false);
+}
+
+PeakMeters Strat3Processor::takePeaks() noexcept
+{
+    PeakMeters m;
+    for (std::size_t c = 0; c < 2; ++c)
+    {
+        m.inPeakDb[c] = toMeterDb (inPeakHold[c].exchange (0.0f));
+        m.outPeakDb[c] = toMeterDb (outPeakHold[c].exchange (0.0f));
+    }
+    m.outTruePeakDb = toMeterDb (outTpHold.exchange (0.0f));
+    const float gr = grHold.exchange (0.0f);
+    m.grDb = gr > 0.0f ? -gr : 0.0f;
+    m.inClip = inClipLatched.load();
+    m.outClip = outClipLatched.load();
+    return m;
+}
+
+void Strat3Processor::clearClips() noexcept
+{
+    inClipLatched.store (false);
+    outClipLatched.store (false);
 }
 
 bool Strat3Processor::readImpact (analysis::ImpactFrame& out)
@@ -340,7 +409,7 @@ bool Strat3Processor::readImpact (analysis::ImpactFrame& out)
 
 juce::AudioProcessorEditor* Strat3Processor::createEditor()
 {
-    return new juce::GenericAudioProcessorEditor (*this);   // the hybrid UI replaces it later
+    return new ui::Strat3Editor (*this);   // native part of the hybrid UI (module 19c)
 }
 
 void Strat3Processor::getStateInformation (juce::MemoryBlock& dest)

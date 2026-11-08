@@ -33,8 +33,10 @@
 #include <atomic>
 #include <cmath>
 
+#include "analysis/Correlation.h"
 #include "analysis/ImpactAnalyser.h"
 #include "analysis/Loudness1770.h"
+#include "analysis/TruePeak.h"
 #include "dsp/core/DelayLine.h"
 #include "dsp/core/Smoother.h"
 #include "dsp/crossover/BandDomain.h"
@@ -129,6 +131,17 @@ struct EngineConfig
 };
 
 /** Not copyable or movable (atomics in the FIR swaps and taps): construct in place. */
+/** Output metering of the last process() call (audio thread; the processor publishes it).
+ *  Linear peaks; grDb <= 0 is the most reduction of CEILING + LIMIT (detector gain, before the
+ *  depth blend [INFERRED]: at depth < 100 % the audible reduction is smaller). */
+struct BlockMeters
+{
+    std::array<float, 2> inPeak {}, outPeak {};   // sample peak, IN TRIM input / CEILING output
+    float outTruePeak = 0.0f;                     // 4x true peak of the CEILING output
+    float grDb = 0.0f;
+    float correlation = 1.0f;                     // output, at the end of the block
+};
+
 struct Engine
 {
     EngineConfig config {};
@@ -173,6 +186,9 @@ struct Engine
     // ---- analysis taps (consumers: the analysis thread)
     analysis::ImpactCapture capture {};
     analysis::LoudnessTap loudIn {}, loudOut {};
+    BlockMeters blockMeters {};
+    std::array<analysis::TruePeakDetector, 2> outTp {};   // delivery meter (the CEILING has its own)
+    analysis::CorrelationMeter outCorr {};
 
     // ---- background designer's view (owned by the requestDesigns thread)
     dsp::EqSettings designedEq {};
@@ -274,6 +290,11 @@ inline void resetNonFinite (Engine& e) noexcept
     dsp::resetIfNotFinite (e.ceiling);
     analysis::resetIfNotFinite (e.loudIn);
     analysis::resetIfNotFinite (e.loudOut);
+    if (! analysis::isFinite (e.outCorr))
+        analysis::reset (e.outCorr);
+    for (auto& d : e.outTp)
+        if (! std::all_of (d.ring.begin(), d.ring.end(), [] (float v) { return std::isfinite (v); }))
+            analysis::reset (d);
 
     // FIR state has no feedback but a whole kernel of memory: clear it rather than wait out
     // ~100 ms of NaN. Only the slots the audio thread owns: the standby slot belongs to the
@@ -337,6 +358,9 @@ inline int latencySamples (const Engine& e) noexcept
 inline std::array<int, kRows> rowLatencies (const Engine& e) noexcept { return e.rows; }
 
 inline int effectiveSatOs (const Engine& e) noexcept { return e.satOs; }
+
+/** Output metering of the last process() call. Audio thread (read it right after process()). */
+inline const BlockMeters& blockMeters (const Engine& e) noexcept { return e.blockMeters; }
 
 /** The prepared chain order (kDefaultOrder if the config's order was not a permutation). */
 inline LayerOrder layerOrder (const Engine& e) noexcept { return e.order; }
@@ -505,6 +529,10 @@ inline void prepare (Engine& e, const EngineConfig& cfg, const EngineParams& p)
     analysis::prepare (e.capture, kRows + 1);
     analysis::prepare (e.loudIn, fs);
     analysis::prepare (e.loudOut, fs);
+    analysis::prepare (e.outCorr, fs);
+    for (auto& d : e.outTp)
+        analysis::reset (d);
+    e.blockMeters = {};
 
     e.inTrim = dsp::makeLinearRamp (kTrimRampMs, fs, 0.0f);
     e.outTrim = dsp::makeLinearRamp (kTrimRampMs, fs, 0.0f);
@@ -601,6 +629,12 @@ inline void process (Engine& e, float* l, float* r, int numSamples,
     for (int d = 0; d < e.domainCount; ++d)
         dsp::beginBlock (e.domains[static_cast<std::size_t> (d)]);
     analysis::beginBlock (e.capture, numSamples);
+    auto& bm = e.blockMeters;
+    bm.inPeak = { 0.0f, 0.0f };
+    bm.outPeak = { 0.0f, 0.0f };
+    bm.outTruePeak = 0.0f;
+    bm.grDb = 0.0f;
+    const bool meterLimit = e.params.layer[kLimit].on, meterCeiling = e.params.ceilingOn;
     const bool external = e.params.mb.sidechain == dsp::MbSidechain::External
                        && sidechainL != nullptr && sidechainR != nullptr;
 
@@ -609,6 +643,8 @@ inline void process (Engine& e, float* l, float* r, int numSamples,
         auto tap = [&] (int t, float a, float b) { analysis::write (e.capture, t, i, a, b); };
         float x[2] { l[i], r[i] };
         tap (0, x[0], x[1]);
+        bm.inPeak[0] = std::max (bm.inPeak[0], std::abs (x[0]));
+        bm.inPeak[1] = std::max (bm.inPeak[1], std::abs (x[1]));
         analysis::push (e.loudIn, x[0], x[1]);
 
         // ---- IN TRIM
@@ -742,6 +778,20 @@ inline void process (Engine& e, float* l, float* r, int numSamples,
         tap (9, c[0], c[1]);
         analysis::push (e.loudOut, c[0], c[1]);
 
+        // ---- delivery meters (what is printed: after CEILING, before the monitor-only gain match)
+        for (std::size_t ch = 0; ch < 2; ++ch)
+        {
+            bm.outPeak[ch] = std::max (bm.outPeak[ch], std::abs (c[ch]));
+            bm.outTruePeak = std::max (bm.outTruePeak, analysis::push (e.outTp[ch], c[ch]));   // NaN is ignored
+        }
+        analysis::push (e.outCorr, c[0], c[1]);
+        {
+            float gr = meterCeiling ? dsp::ceilingGainDb (e.ceiling, 0) : 0.0f;
+            if (meterLimit)
+                gr += std::min (dsp::limitGainDb (e.limit, 0), dsp::limitGainDb (e.limit, 1));
+            bm.grDb = std::min (bm.grDb, gr);
+        }
+
         // ---- gain match (monitor only: after everything that is printed)
         if (isSmoothing (e.gainMatchDb))
             e.matchGain = dbToGain (step (e.gainMatchDb));
@@ -750,6 +800,7 @@ inline void process (Engine& e, float* l, float* r, int numSamples,
     }
 
     analysis::endBlock (e.capture);
+    bm.correlation = analysis::value (e.outCorr);
     flushDenormals (e);
 
     for (int i = 0; i < numSamples && ! bad; ++i)
@@ -758,6 +809,10 @@ inline void process (Engine& e, float* l, float* r, int numSamples,
     {
         std::fill (l, l + numSamples, 0.0f);
         std::fill (r, r + numSamples, 0.0f);
+        // Meter what is printed: the muted block (an inf would otherwise hold the program max).
+        bm.outPeak = { 0.0f, 0.0f };
+        bm.outTruePeak = 0.0f;
+        bm.grDb = 0.0f;
         resetNonFinite (e);
         e.nonFinite.store (true, std::memory_order_release);
     }

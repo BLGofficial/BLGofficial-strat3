@@ -19,6 +19,7 @@
 
 #include <array>
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -38,6 +39,7 @@ engine::LayerOrder engineOrder (const std::vector<std::string>& ids);
 inline constexpr int kAnalysisHz = 30;
 inline constexpr float kCpuSmoothing = 0.1f;          // per block, one-pole on the load reading
 inline constexpr float kGainMatchGateLufs = -70.0f;   // below this (either side) keep the last offset
+inline constexpr float kMeterFloorDb = -100.0f;       // peaks of silence; also "nothing measured yet"
 
 struct Meters
 {
@@ -46,6 +48,18 @@ struct Meters
     float gainMatchDb = 0.0f;
     float cpuLoad = 0.0f;    // processBlock time / block duration
     bool nonFinite = false;  // latched until clearNonFiniteFlag()
+    float correlation = 1.0f;                         // output, 300 ms; +1 for silence
+    float truePeakMaxDb = kMeterFloorDb;              // output program max since the last prepare
+    float plr = std::numeric_limits<float>::quiet_NaN();   // truePeakMaxDb - integrated; NaN while empty
+};
+
+/** Held since the last takePeaks() (one consumer: the editor). dBFS / dBTP, floor kMeterFloorDb. */
+struct PeakMeters
+{
+    std::array<float, 2> inPeakDb { kMeterFloorDb, kMeterFloorDb }, outPeakDb { kMeterFloorDb, kMeterFloorDb };
+    float outTruePeakDb = kMeterFloorDb;
+    float grDb = 0.0f;                  // most reduction (<= 0): CEILING + LIMIT detector gain
+    bool inClip = false, outClip = false;   // latched until clearClips()
 };
 
 class Strat3Processor final : public juce::AudioProcessor, private juce::AsyncUpdater
@@ -89,6 +103,9 @@ public:
 
     Meters meters() const noexcept;
     void clearNonFiniteFlag() noexcept { nonFiniteLatched.store (false); }
+    /** Editor (one consumer). Returns the peaks held since the last call and restarts the hold. */
+    PeakMeters takePeaks() noexcept;
+    void clearClips() noexcept;
     /** Message thread. Latest impact map (rows = engine::kRows). False if nothing new. */
     bool readImpact (analysis::ImpactFrame& out);
 
@@ -134,6 +151,14 @@ private:
     std::atomic<float> mLufs { -100.0f }, sLufs { -100.0f }, iLufs { -100.0f }, inSLufs { -100.0f };
     std::atomic<float> gainMatchOffset { 0.0f }, cpuLoad { 0.0f };
     std::atomic<bool> nonFiniteLatched { false };
+    // Delivery metering: linear holds. One writer (audio) raises them; one reader (the editor)
+    // exchanges them back to 0, so no value is lost: a raise that lands after the exchange
+    // belongs to the next take.
+    std::array<std::atomic<float>, 2> inPeakHold {}, outPeakHold {};
+    std::atomic<float> outTpHold { 0.0f }, grHold { 0.0f }, tpProgramMax { 0.0f }, outCorrelation { 1.0f };
+    std::atomic<bool> inClipLatched { false }, outClipLatched { false };
+    void publishMeters (const engine::BlockMeters&) noexcept;   // audio thread
+    void resetMeters() noexcept;
 
     const bool runAnalysisThread;
     std::unique_ptr<AnalysisThread> analysisThread;

@@ -311,3 +311,46 @@ TEST_CASE ("keyboard row selection clamps; accessibility label names slot, layer
     CHECK (accessibleLayerLabel (2, engine::kMb, 72.4f, true) == "Layer 3, Multiband, depth 72 percent");
     CHECK (accessibleLayerLabel (0, engine::kEq, 100.0f, false) == "Layer 1, EQ, off, depth 100 percent");
 }
+
+// ---- module 19c additions: the editor's own behaviour that is not drawing
+
+TEST_CASE ("layout without the assistant gives the stack the full width", "[ui][model]")
+{
+    const auto l = computeLayout (1400, 900, false);
+    CHECK (l.assist.w == 0);
+    CHECK_FALSE (l.assistDrawer);   // no drawer either: there is nothing to open yet
+    CHECK (l.stack.w == 1400);
+    CHECK (tiles (l, 1400, 900));
+}
+
+TEST_CASE ("peak meters fall at a fixed rate and never below the floor", "[ui][model]")
+{
+    CHECK_THAT (meterFall (-10.0f, -40.0f, 0.5f), WithinAbs (-10.0 - 0.5 * static_cast<double> (kMeterFallDbPerSec), 1e-4));
+    CHECK_THAT (meterFall (-10.0f, -3.0f, 0.5f), WithinAbs (-3.0, 1e-6));   // rises at once
+    CHECK_THAT (meterFall (-95.0f, -100.0f, 10.0f), WithinAbs (kMeterFloorDb, 1e-6));
+    CHECK_THAT (meterFall (std::numeric_limits<float>::quiet_NaN(), -6.0f, 0.1f), WithinAbs (-6.0, 1e-6));
+    CHECK_THAT (meterFall (-6.0f, std::numeric_limits<float>::quiet_NaN(), 0.1f), WithinAbs (-6.0 - 0.1 * static_cast<double> (kMeterFallDbPerSec), 1e-4));
+}
+
+TEST_CASE ("peak readouts hold their maximum for the hold time", "[ui][model]")
+{
+    PeakHold h;
+    CHECK (h.db == kMeterFloorDb);
+    update (h, -6.0f, 0.1f);
+    CHECK (h.db == -6.0f);
+    update (h, -20.0f, kPeakHoldSec - 0.2f);   // still held
+    CHECK (h.db == -6.0f);
+    update (h, -20.0f, 0.3f);                  // hold expired: takes the new reading
+    CHECK (h.db == -20.0f);
+    update (h, -3.0f, 0.01f);                  // a higher peak restarts the hold
+    CHECK (h.db == -3.0f);
+    update (h, -30.0f, kPeakHoldSec - 0.05f);
+    CHECK (h.db == -3.0f);
+}
+
+TEST_CASE ("linked trims keep the gain through the chain constant", "[ui][model]")
+{
+    CHECK_THAT (linkedOutTrim (3.0f, 0.0f, 0.0f), WithinAbs (-3.0, 1e-6));
+    CHECK_THAT (linkedOutTrim (-2.0f, 3.0f, -3.0f), WithinAbs (2.0, 1e-6));
+    CHECK_THAT (linkedOutTrim (24.0f, 0.0f, -10.0f), WithinAbs (-24.0, 1e-6));   // clamped to the range
+}

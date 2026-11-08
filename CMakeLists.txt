@@ -71,10 +71,11 @@ target_link_libraries(strat3_params INTERFACE juce::juce_audio_processors juce::
 set_source_files_properties(${STRAT3_PARAM_SOURCES} PROPERTIES COMPILE_OPTIONS "${STRAT3_WARNING_FLAGS}")
 
 # ---------------------------------------------------------------- processor
-# The AudioProcessor itself (APVTS -> engine, state, analysis thread). Outside the plugin
-# target so the tests drive the exact class the host will load.
+# The AudioProcessor itself (APVTS -> engine, state, analysis thread) and its native editor.
+# Outside the plugin target so the tests drive the exact classes the host will load.
 file(GLOB_RECURSE STRAT3_PROCESSOR_SOURCES CONFIGURE_DEPENDS
-    ${CMAKE_CURRENT_SOURCE_DIR}/source/processor/*.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/processor/*.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/ui/*.cpp)
 add_library(strat3_processor INTERFACE)
 target_sources(strat3_processor INTERFACE ${STRAT3_PROCESSOR_SOURCES})
 target_link_libraries(strat3_processor INTERFACE strat3_dsp strat3_params juce::juce_audio_processors)
@@ -101,8 +102,7 @@ if(STRAT3_BUILD_PLUGIN)
 
     file(GLOB_RECURSE STRAT3_PLUGIN_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/source/assistant/*.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/ui/*.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/Plugin*.cpp)
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/Plugin*.cpp)   # source/ui comes with strat3_processor
     target_sources(STRAT3 PRIVATE ${STRAT3_PLUGIN_SOURCES})
     set_source_files_properties(${STRAT3_PLUGIN_SOURCES} PROPERTIES COMPILE_OPTIONS "${STRAT3_WARNING_FLAGS}")
 

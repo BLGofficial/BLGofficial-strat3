@@ -25,12 +25,17 @@ inline constexpr int kAssistCollapseW = 1100, kAssistW = 300;                // 
 inline constexpr int kHeaderH = 44, kDeliveryH = 64;
 // 9 rows * 52 = 468 fits the 492 px stack of the minimum window, so nothing scrolls collapsed.
 inline constexpr int kRowH = 52, kEditorH = 300, kLabelW = 220, kStatsW = 96;
+inline constexpr int kDefaultW = 1280, kDefaultH = 800;
 inline constexpr float kDepthMax = 150.0f;
 inline constexpr float kDepthFine = 0.1f;   // Shift: drag speed and key step
 // Below the floor a cell is blank so analyser noise does not paint the whole map; 6 dB of
 // change is full intensity [INFERRED own tuning: a mastering move rarely exceeds it].
 inline constexpr float kImpactFloorDb = 0.1f, kImpactFullScaleDb = 6.0f;
 inline constexpr float kLufsFloor = -70.0f;   // matches the gain-match gate
+inline constexpr float kMeterFloorDb = -100.0f;   // = processor::kMeterFloorDb
+inline constexpr float kMeterFallDbPerSec = 20.0f;   // [INFERRED own tuning, near IEC PPM fall-back]
+inline constexpr float kPeakHoldSec = 1.5f;
+inline constexpr float kTrimMinDb = -24.0f, kTrimMaxDb = 24.0f;
 inline constexpr double kFreqLoHz = 20.0, kFreqHiHz = 20000.0;
 inline constexpr std::array<double, 10> kFreqTicks { 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0 };
 
@@ -50,14 +55,15 @@ struct RowInfo { RowKind kind = RowKind::Layer; engine::DepthLayer layer = engin
 
 // ------------------------------------------------------------------------------ geometry
 
-/** Window regions for a requested size, clamped to the Phase 4 range. */
-inline Layout computeLayout (int w, int h)
+/** Window regions for a requested size, clamped to the Phase 4 range. `assistant` false
+ *  (the WebView panels are not built yet) gives its column to the stack. */
+inline Layout computeLayout (int w, int h, bool assistant = true)
 {
     Layout l;
     l.width = std::clamp (w, kMinW, kMaxW);
     l.height = std::clamp (h, kMinH, kMaxH);
-    l.assistDrawer = l.width < kAssistCollapseW;
-    const int assistW = l.assistDrawer ? 0 : kAssistW;
+    l.assistDrawer = assistant && l.width < kAssistCollapseW;
+    const int assistW = assistant && ! l.assistDrawer ? kAssistW : 0;
     const int middleH = l.height - kHeaderH - kDeliveryH;
     l.header = { 0, 0, l.width, kHeaderH };
     l.stack = { 0, kHeaderH, l.width - assistW, middleH };
@@ -103,12 +109,27 @@ inline RowParts rowParts (Rect row)
 
 inline float clampDepth (float d) noexcept { return std::clamp (d, 0.0f, kDepthMax); }
 
-/** Horizontal drag: the full track width spans 0..150 %; `fine` (Shift) moves 1/10 as fast. */
-inline float depthFromDrag (float start, float dxPx, float trackPx, bool fine)
+/** Horizontal drag of any linear value: the full track spans lo..hi; `fine` (Shift) moves
+ *  1/10 as fast. dxPx is measured from where the drag started. */
+inline float dragValue (float start, float dxPx, float trackPx, bool fine, float lo, float hi)
 {
     if (! (trackPx > 0.0f) || ! std::isfinite (dxPx))
         return start;
-    return clampDepth (start + dxPx / trackPx * kDepthMax * (fine ? kDepthFine : 1.0f));
+    return std::clamp (start + dxPx / trackPx * (hi - lo) * (fine ? kDepthFine : 1.0f), lo, hi);
+}
+
+/** Key step of `coarse` (or `fineStep` with Shift), snapped to the fineStep grid so repeated
+ *  steps do not drift. */
+inline float stepValue (float v, int dir, bool fine, float coarse, float fineStep, float lo, float hi)
+{
+    const float step = (fine ? fineStep : coarse) * static_cast<float> (dir > 0 ? 1 : (dir < 0 ? -1 : 0));
+    return std::clamp (std::round ((v + step) / fineStep) * fineStep, lo, hi);
+}
+
+/** Depth: the full track width spans 0..150 %. */
+inline float depthFromDrag (float start, float dxPx, float trackPx, bool fine)
+{
+    return dragValue (start, dxPx, trackPx, fine, 0.0f, kDepthMax);
 }
 
 inline float depthToX (float depth, float trackPx) { return clampDepth (depth) / kDepthMax * trackPx; }
@@ -117,8 +138,7 @@ inline float xToDepth (float x, float trackPx) { return trackPx > 0.0f ? clampDe
 /** Left / Right: 1 %, or 0.1 % with Shift. Rounded to 0.1 so repeated steps do not drift. */
 inline float depthStep (float depth, int dir, bool fine)
 {
-    const float step = (fine ? kDepthFine : 1.0f) * static_cast<float> (dir > 0 ? 1 : (dir < 0 ? -1 : 0));
-    return clampDepth (std::round ((depth + step) * 10.0f) / 10.0f);
+    return stepValue (depth, dir, fine, 1.0f, kDepthFine, 0.0f, kDepthMax);
 }
 
 // ------------------------------------------------------------------------------ frequency axis
@@ -212,6 +232,39 @@ inline std::string formatLatency (int samples, double sampleRate)
         return "0";
     const double ms = 1000.0 * samples / sampleRate;
     return ms < 1.0 ? std::to_string (samples) + "smp" : detail::fixed (ms, 1) + "ms";
+}
+
+// ------------------------------------------------------------------------------ meters
+
+/** Bar meter ballistics: rises at once, falls at kMeterFallDbPerSec. */
+inline float meterFall (float shownDb, float newDb, float dtSec)
+{
+    const float shown = std::isfinite (shownDb) ? shownDb : kMeterFloorDb;
+    const float fallen = shown - kMeterFallDbPerSec * std::max (0.0f, dtSec);
+    const float next = std::isfinite (newDb) ? std::max (newDb, fallen) : fallen;
+    return std::max (next, kMeterFloorDb);
+}
+
+/** Numeric peak readout (true peak): holds the maximum for kPeakHoldSec. */
+struct PeakHold { float db = kMeterFloorDb; float age = 0.0f; };
+
+inline void update (PeakHold& h, float newDb, float dtSec)
+{
+    h.age += std::max (0.0f, dtSec);
+    if (! std::isfinite (newDb))
+        newDb = kMeterFloorDb;
+    if (newDb >= h.db || h.age >= kPeakHoldSec)
+    {
+        h.db = newDb;
+        h.age = 0.0f;
+    }
+}
+
+/** ARCHON-style trim link: OUT TRIM moves opposite to IN TRIM, so the level after the chain's
+ *  own gain stays where it was. */
+inline float linkedOutTrim (float inNewDb, float inOldDb, float outOldDb)
+{
+    return std::clamp (outOldDb - (inNewDb - inOldDb), kTrimMinDb, kTrimMaxDb);
 }
 
 // ------------------------------------------------------------------------------ rows and order
