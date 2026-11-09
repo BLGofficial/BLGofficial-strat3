@@ -273,8 +273,11 @@ void Strat3Editor::tick (float dt)
     if (proc.readImpact (frame))
         for (auto& r : rows)
             if (r->info().impactRow < frame.layers)
-                r->setImpact (frame.gainDb[static_cast<std::size_t> (r->info().impactRow)],
-                              frame.widthDb[static_cast<std::size_t> (r->info().impactRow)]);
+            {
+                const auto ir = static_cast<std::size_t> (r->info().impactRow);
+                r->setImpact (frame.gainDb[ir], frame.widthDb[ir]);
+                r->setSpectrum (frame.levelDb[ir]);
+            }
 
     const auto lat = engine::rowLatencies (proc.getEngine());
     const double fs = proc.getEngine().config.sampleRate;   // the host may not have set getSampleRate()

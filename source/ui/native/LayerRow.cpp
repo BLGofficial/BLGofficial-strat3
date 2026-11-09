@@ -94,6 +94,7 @@ void LayerPanel::paint (juce::Graphics& g)
 LayerRow::LayerRow (juce::AudioProcessorValueTreeState& s, RowInfo info)
     : state (s), rowInfo (info)
 {
+    levels.fill (analysis::kImpactLevelFloorDb);   // "nothing analysed yet", not 0 dB
     auto param = [this] (const juce::String& id) -> juce::RangedAudioParameter&
     {
         auto* p = state.getParameter (id);
@@ -165,7 +166,13 @@ bool LayerRow::active() const { return onParam != nullptr && onParam->getValue()
 
 void LayerRow::setExpanded (bool shouldExpand)
 {
-    if (shouldExpand && panel == nullptr && expandable())
+    if (shouldExpand && eqEd == nullptr && rowInfo.kind == RowKind::Layer && rowInfo.layer == engine::kEq)
+    {
+        eqEd = std::make_unique<EqEditor> (state);
+        eqEd->setSpectrum (levels);
+        addAndMakeVisible (*eqEd);
+    }
+    else if (shouldExpand && panel == nullptr && eqEd == nullptr && expandable())
     {
         juce::StringArray exclude { handleId };
         if (onParam != nullptr)
@@ -175,8 +182,18 @@ void LayerRow::setExpanded (bool shouldExpand)
         addAndMakeVisible (*panel);
     }
     else if (! shouldExpand)
+    {
         panel.reset();
+        eqEd.reset();
+    }
     resized();
+}
+
+void LayerRow::setSpectrum (const std::array<float, analysis::kImpactBands>& levelDb)
+{
+    levels = levelDb;
+    if (eqEd != nullptr)
+        eqEd->setSpectrum (levelDb);
 }
 
 void LayerRow::setSelected (bool s)
@@ -224,6 +241,8 @@ void LayerRow::refresh()
         valueHandle->setTitle (title);
     valueHandle->setAccent (active());
     repaint (0, 0, kMarkerW, kRowH);
+    if (eqEd != nullptr)
+        eqEd->refresh();   // host automation and undo move the nodes too
 }
 
 void LayerRow::paint (juce::Graphics& g)
@@ -293,6 +312,8 @@ void LayerRow::resized()
     valueHandle->setBounds (kMarkerW + 8, 28, parts.label.w - kMarkerW - 16, 18);
     if (panel != nullptr)
         panel->setBounds (parts.editor.x, parts.editor.y, parts.editor.w, parts.editor.h);
+    if (eqEd != nullptr)
+        eqEd->setBounds (parts.editor.x, parts.editor.y, parts.editor.w, parts.editor.h);
 }
 
 void LayerRow::mouseDown (const juce::MouseEvent& e)
