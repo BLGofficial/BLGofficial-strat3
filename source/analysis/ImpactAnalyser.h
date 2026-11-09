@@ -39,6 +39,7 @@ inline constexpr float kImpactClampDb = 24.0f;
 inline constexpr double kImpactMaxLatencyMs = 100.0;
 inline constexpr double kImpactEnergyFloor = 1e-12;   // -120 dB: below this a band is "silent"
 inline constexpr double kImpactWidthFloor = 1e-6;     // side/mid floor relative to the band energy
+inline constexpr float kImpactLevelFloorDb = -120.0f; // = 10 log10 (kImpactEnergyFloor): level of a silent band
 
 inline double impactBandCentreHz (int band) noexcept { return 1000.0 * std::pow (2.0, static_cast<double> (band - 34) / 6.0); }
 
@@ -158,6 +159,15 @@ struct ImpactFrame
 {
     int layers = 0;
     std::array<std::array<float, kImpactBands>, kMaxImpactLayers> gainDb {}, widthDb {};
+    // Module 20b: smoothed level entering each layer (mid + side mean square per band, dB,
+    // floored). The EQ editor draws it behind its nodes; it costs nothing extra here, the
+    // "before" energies are already computed for the gain ratio.
+    std::array<std::array<float, kImpactBands>, kMaxImpactLayers> levelDb = [] {
+        std::array<std::array<float, kImpactBands>, kMaxImpactLayers> a {};
+        for (auto& row : a)
+            row.fill (kImpactLevelFloorDb);
+        return a;
+    }();
 };
 
 struct ImpactBandShare
@@ -364,6 +374,9 @@ inline void computeFrame (ImpactAnalyser& a) noexcept
             s.postS[b] = qs[b] + a.coeff * (s.postS[b] - qs[b]);
             const double before = s.preM[b] + s.preS[b], after = s.postM[b] + s.postS[b];
             f.gainDb[li][b] = impactdetail::finishDb (10.0 * std::log10 ((after + kImpactEnergyFloor) / (before + kImpactEnergyFloor)));
+            f.levelDb[li][b] = before > kImpactEnergyFloor
+                                   ? static_cast<float> (10.0 * std::log10 (before))
+                                   : kImpactLevelFloorDb;
             f.widthDb[li][b] = impactdetail::finishDb (10.0 * std::log10 (impactdetail::sideRatio (s.postS[b], s.postM[b])
                                                                           / impactdetail::sideRatio (s.preS[b], s.preM[b])));
         }

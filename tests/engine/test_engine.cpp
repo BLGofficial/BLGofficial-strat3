@@ -812,7 +812,10 @@ TEST_CASE ("engine: setParams and process never allocate", "[engine][rt]")
             setParams (*e, p);
             process (*e, l.data(), r.data(), kBlock, sc.data(), sc.data());
         }
+        // Read before INFO: Catch's message stack allocates on its first push in a fresh
+        // process (ctest runs each case alone), and the counter is still live here.
+        const auto allocs = count.count();
         INFO ("mode " << static_cast<int> (mode));
-        CHECK (count.count() == 0u);
+        CHECK (allocs == 0u);
     }
 }

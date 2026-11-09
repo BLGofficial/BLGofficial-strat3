@@ -491,3 +491,53 @@ TEST_CASE ("a NaN in the capture never reaches the published frame", "[analysis]
     rig.run (src, { gain (0.5f) }, 96000);
     CHECK (std::abs (rig.latest().gainDb[0][34] - -6.0206f) < 0.05f);
 }
+
+// Module 20b: the EQ editor draws the spectrum entering the EQ layer behind its nodes. The
+// analyser already holds the smoothed "before" band energies, so it publishes them as levels:
+//   levelDb = 10 log10 (E_before), E = mid + side mean square per 1/6-octave band, floored at
+//   kImpactLevelFloorDb. Same smoothing as the impact, so the backdrop and the map agree.
+TEST_CASE ("level spectrum: a sine reads its mean square in its band, others far below", "[analysis][impact][level]")
+{
+    Rig rig (2);
+    const double amp = 0.5;   // mono: mid = amp, side = 0 -> E = amp^2 / 2 = -9.03 dB
+    auto phase = std::make_shared<double> (0.0);
+    const auto sine = [=] {
+        const float v = static_cast<float> (amp * std::sin (*phase));
+        *phase += kTwoPi * 1000.0 / kFs;
+        return StereoSample { v, v };
+    };
+    rig.run (sine, { gain (1.0f), gain (0.5f) }, static_cast<int> (kFs * 3.0));
+    const auto f = rig.latest();
+    const int band1k = 34;
+    const double expect = 10.0 * std::log10 (amp * amp / 2.0);
+    // The 1 kHz band takes most of the Hann main lobe; the neighbours split the rest.
+    CHECK (std::abs (static_cast<double> (f.levelDb[0][band1k]) - expect) < 1.0);
+    // Layer 1's input is tap 1, after the unity gain of layer 0: the same level.
+    CHECK (std::abs (static_cast<double> (f.levelDb[1][band1k]) - expect) < 1.0);
+    for (int b : bandsBetween (20.0, 500.0))
+        CHECK (static_cast<double> (f.levelDb[0][static_cast<size_t> (b)]) < expect - 60.0);
+    for (int b : bandsBetween (2000.0, 20000.0))
+        CHECK (static_cast<double> (f.levelDb[0][static_cast<size_t> (b)]) < expect - 60.0);
+}
+
+TEST_CASE ("level spectrum: input level per layer follows the chain", "[analysis][impact][level]")
+{
+    Rig rig (2);
+    rig.run (noise (0.25f, 7), { gain (0.5f), gain (1.0f) }, static_cast<int> (kFs * 3.0));
+    const auto f = rig.latest();
+    // Layer 1's input is layer 0's output: 6.02 dB lower in every band.
+    for (int b : bandsBetween (100.0, 16000.0))
+        CHECK (std::abs (static_cast<double> (f.levelDb[0][static_cast<size_t> (b)] - f.levelDb[1][static_cast<size_t> (b)]) - 6.02) < 0.2);
+}
+
+TEST_CASE ("level spectrum: silence reads the floor, never -inf", "[analysis][impact][level]")
+{
+    Rig rig (1);
+    rig.run ([] { return StereoSample {}; }, { gain (1.0f) }, static_cast<int> (kFs * 1.0));
+    const auto f = rig.latest();
+    for (int b = 0; b < kImpactBands; ++b)
+    {
+        CHECK (std::isfinite (f.levelDb[0][static_cast<size_t> (b)]));
+        CHECK (f.levelDb[0][static_cast<size_t> (b)] == kImpactLevelFloorDb);
+    }
+}

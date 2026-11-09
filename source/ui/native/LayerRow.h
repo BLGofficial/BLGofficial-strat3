@@ -11,12 +11,13 @@
 
 #include "analysis/ImpactAnalyser.h"
 #include "ui/model/UiModel.h"
+#include "ui/native/EqEditor.h"
 #include "ui/native/ValueHandle.h"
 
 namespace strat3::ui {
 
-/** Generic in-place editor: one control per parameter with the given prefix. The bespoke
- *  editors (EQ nodes on the spectrum first, module 20) replace it per layer. */
+/** Generic in-place editor: one control per parameter with the given prefix. The EQ row uses
+ *  EqEditor instead (module 20); later bespoke editors replace it per layer the same way. */
 class LayerPanel final : public juce::Component
 {
 public:
@@ -43,7 +44,14 @@ public:
     bool expandable() const noexcept { return ! panelPrefix.isEmpty(); }
 
     void setExpanded (bool);
-    int panelControlCount() const noexcept { return panel != nullptr ? panel->controlCount() : 0; }
+    int panelControlCount() const noexcept
+    {
+        return panel != nullptr ? panel->controlCount() : (eqEd != nullptr ? eqEd->controlCount() : 0);
+    }
+    /** The EQ row's spectrum editor while expanded (module 20), else nullptr. */
+    EqEditor* eqEditor() noexcept { return eqEd.get(); }
+    /** EQ input level per band (ImpactFrame::levelDb); kept while collapsed for the next open. */
+    void setSpectrum (const std::array<float, analysis::kImpactBands>& levelDb);
     void setSelected (bool);
     /** Impact row of the latest frame (gain / width per band, dB). */
     void setImpact (const std::array<float, analysis::kImpactBands>& gainDb, const std::array<float, analysis::kImpactBands>& widthDb);
@@ -75,6 +83,8 @@ private:
     std::unique_ptr<juce::ToggleButton> on, delta, link;
     std::unique_ptr<juce::ButtonParameterAttachment> onAttach, deltaAttach;
     std::unique_ptr<LayerPanel> panel;
+    std::unique_ptr<EqEditor> eqEd;   // replaces `panel` on the EQ row (module 20)
+    std::array<float, analysis::kImpactBands> levels {};
     std::array<float, analysis::kImpactBands> cells {};
     juce::String stats;
     bool selected = false, reordering = false;
