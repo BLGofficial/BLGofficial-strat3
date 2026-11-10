@@ -5,6 +5,34 @@
 
 namespace strat3::ui {
 
+// ------------------------------------------------------------------------------ gear
+
+void GearButton::paintButton (juce::Graphics& g, bool over, bool down)
+{
+    const auto r = getLocalBounds().toFloat();
+    g.setColour (over || down ? theme::kRowSelected : theme::kRow);
+    g.fillRect (r);
+    g.setColour (down ? theme::kText : theme::kRule);
+    g.drawRect (r, 1.0f);
+
+    // Eight square teeth on a ring, hole in the middle: hard edges, as the rest of the theme.
+    const float s = std::min (r.getWidth(), r.getHeight()) * 0.5f;
+    const float outer = s * 0.62f, body = s * 0.46f, hole = s * 0.2f, tooth = s * 0.22f;
+    juce::Path gearPath;
+    gearPath.setUsingNonZeroWinding (false);
+    gearPath.addEllipse (-body, -body, 2.0f * body, 2.0f * body);
+    gearPath.addEllipse (-hole, -hole, 2.0f * hole, 2.0f * hole);
+    for (int k = 0; k < 8; ++k)
+    {
+        juce::Path t;
+        t.addRectangle (-tooth * 0.5f, -outer, tooth, outer - body + 1.0f);
+        t.applyTransform (juce::AffineTransform::rotation (static_cast<float> (k) * juce::MathConstants<float>::pi / 4.0f));
+        gearPath.addPath (t);
+    }
+    g.setColour (theme::kText);
+    g.fillPath (gearPath, juce::AffineTransform::translation (r.getCentreX(), r.getCentreY()));
+}
+
 // ------------------------------------------------------------------------------ header
 
 Header::Header (juce::AudioProcessorValueTreeState& s)
@@ -45,11 +73,20 @@ Header::Header (juce::AudioProcessorValueTreeState& s)
     assistant.setTitle ("Assistant");
     assistant.setClickingTogglesState (true);
     addChildComponent (assistant);   // the editor shows it below the column breakpoint
+
+    gear.setTitle ("Advanced");
+    gear.setDescription ("Crossover, oversampling, dither and sidechain");
+    addChildComponent (gear);        // shown only while the column holds the WebView
 }
 
 void Header::setDrawerMode (bool on)
 {
     assistant.setVisible (on);
+}
+
+void Header::setAdvancedAvailable (bool on)
+{
+    gear.setVisible (on);
 }
 
 Header::~Header() = default;
@@ -62,7 +99,7 @@ void Header::paint (juce::Graphics& g)
     g.drawText ("STRAT3", 16, 0, 120, getHeight(), juce::Justification::centredLeft, false);
     g.setColour (theme::kSecondary);
     g.setFont (theme::label (10.0f));
-    g.drawText ("TARGET", 420, 0, 60, getHeight(), juce::Justification::centredRight, false);
+    g.drawText ("TARGET", 384, 0, 60, getHeight(), juce::Justification::centredRight, false);
     g.setColour (theme::kRule);
     g.fillRect (0, getHeight() - 1, getWidth(), 1);
 }
@@ -76,10 +113,13 @@ void Header::resized()
         b.setBounds (x, y, 80, h);
         x += 80;
     }
-    target.setBounds (488, y, 150, h);
-    delta.setBounds (getWidth() - 16 - 32, y, 32, h);
+    // Moved 36 px left in module 21d to make room for the gear at the minimum width.
+    target.setBounds (452, y, 150, h);
+    // Right to left, as the Phase 4 wireframe orders them: [GAIN-MATCH] [Δ] [⚙].
+    gear.setBounds (getWidth() - 16 - h, y, h, h);
+    delta.setBounds (gear.getX() - 8 - 32, y, 32, h);
     gainMatch.setBounds (delta.getX() - 8 - 110, y, 110, h);
-    // Left of GAIN-MATCH; at the minimum width (900) it still clears the target box (ends 638).
+    // Left of GAIN-MATCH; at the minimum width (900) it still clears the target box (ends 602).
     assistant.setBounds (gainMatch.getX() - 4 - 88, y, 88, h);
 }
 

@@ -22,6 +22,8 @@ export function replayBridge(search: string): Bridge | null {
       listeners.add(listener)
       return () => void listeners.delete(listener)
     },
+    // No advanced info in a recording: main.tsx has no relays here, so that view is not shown.
+    on: () => () => {},
     requestState: () => listeners.forEach((listener) => listener(state)),
     send: (command) => console.info('[replay] command not sent, no plugin:', command),
   }

@@ -77,3 +77,19 @@ describe('bridge', () => {
     ])
   })
 })
+
+describe('bridge: other events (module 21d)', () => {
+  it('delivers any plugin event to its listeners until stopped', () => {
+    const fake = createFakeBackend()
+    const bridge = connect({ __JUCE__: { backend: fake.backend } })
+    if (bridge === null) throw new Error('no bridge')
+    const listener = vi.fn()
+    const stop = bridge.on('advancedInfo', listener)
+    fake.deliver('advancedInfo', { a: 1 })
+    fake.deliver('showView', { view: 'advanced' })
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(listener).toHaveBeenCalledWith({ a: 1 })
+    stop()
+    expect(fake.listenerCount('advancedInfo')).toBe(0)
+  })
+})

@@ -9,6 +9,9 @@
 //     second after, until the delta has left the analysis windows) and says so
 //   - commands the protocol refuses change nothing
 //   - the session (target, log) is saved with the plugin state and restored
+//   - module 21d: a depth drag (one command per 50 ms) is one gesture per parameter, ended
+//     after kDepthGestureIdleSec without a command, by another command on the move, or when
+//     the panel goes away (the editor closes); the editor's tick ends idle drags
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -26,6 +29,7 @@
 #include "assistant/SessionState.h"
 #include "params/StateMigration.h"
 #include "processor/Strat3Processor.h"
+#include "ui/Strat3Editor.h"
 
 using namespace strat3;
 using processor::Strat3Processor;
@@ -509,4 +513,110 @@ TEST_CASE ("assistant: commands and state reads race the analysis thread safely"
             }
     }
     CHECK (switches >= 1);
+}
+
+namespace {
+
+/** A processor with an accepted LIMIT move at 50 %: what a depth drag acts on. */
+struct AcceptedMove
+{
+    std::unique_ptr<Strat3Processor> p = makeProc();
+    int id = -1;
+    int changes = 0;
+    float to = 0.0f;   // limit.thresh at full depth
+
+    AcceptedMove()
+    {
+        setParam (*p, "global.target", 1.0f);
+        setParam (*p, "low.monoOn", 1.0f);
+        REQUIRE (p->startAssistantCapture (assistant::CaptureKind::Analyse, 1.0));
+        play (*p, 1.5, 0.05f, 21);
+        const auto move = findMove (p->assistantState(), "limit");
+        REQUIRE (move.isObject());
+        id = static_cast<int> (move["id"]);
+        changes = move["changes"].size();
+        to = static_cast<float> (changeTo (move, "limit.thresh"));
+        REQUIRE (p->assistantCommand (json (R"({"type":"accept","id":)" + std::to_string (id) + R"(,"depth":0.5})"), 0.0));
+    }
+
+    juce::var depth (double d) const
+    {
+        return json (R"({"type":"depth","id":)" + std::to_string (id) + R"(,"depth":)" + std::to_string (d) + "}");
+    }
+};
+
+} // namespace
+
+TEST_CASE ("assistant: a depth drag is one gesture per parameter, ended when the hand stops", "[processor][assistant][gesture]")
+{
+    const JuceScope juce;
+    AcceptedMove m;
+    GestureLog log;
+    m.p->addListener (&log);
+
+    // What the page sends while dragged: one command per 50 ms.
+    for (int i = 0; i < 10; ++i)
+        REQUIRE (m.p->assistantCommand (m.depth (0.5 + 0.05 * i), 10.0 + 0.05 * i));
+    CHECK (rawValue (*m.p, "limit.thresh") == Approx (0.95f * m.to).margin (1e-3));
+    CHECK (log.begun == m.changes);   // once per parameter, not once per command
+    CHECK (log.ended == 0);
+    CHECK (log.changesOutsideGesture == 0);
+
+    const double last = 10.45;
+    m.p->closeIdleAssistantGestures (last + Strat3Processor::kDepthGestureIdleSec - 0.01);
+    CHECK (log.ended == 0);   // a short pause is still the same drag
+    m.p->closeIdleAssistantGestures (last + Strat3Processor::kDepthGestureIdleSec);
+    CHECK (log.ended == m.changes);
+
+    // The next drag is the next undo step.
+    REQUIRE (m.p->assistantCommand (m.depth (0.3), 20.0));
+    CHECK (log.begun == 2 * m.changes);
+    m.p->closeAssistantGestures();
+    CHECK (log.ended == 2 * m.changes);
+    m.p->closeAssistantGestures();   // nothing open: nothing more
+    CHECK (log.ended == 2 * m.changes);
+    m.p->removeListener (&log);
+}
+
+TEST_CASE ("assistant: another command on the dragged move ends the drag first", "[processor][assistant][gesture]")
+{
+    const JuceScope juce;
+    AcceptedMove m;
+    GestureLog log;
+    m.p->addListener (&log);
+    REQUIRE (m.p->assistantCommand (m.depth (0.8), 5.0));
+    REQUIRE (log.ended == 0);   // the drag is open
+    REQUIRE (m.p->assistantCommand (json (cmd ("reject", m.id)), 5.05));
+    CHECK (rawValue (*m.p, "limit.thresh") == 0.0f);
+    CHECK (log.begun == log.ended);   // the drag's gestures closed, then the reject's own
+    CHECK (log.begun == 2 * m.changes);
+    CHECK (log.changesOutsideGesture == 0);
+    m.p->removeListener (&log);
+}
+
+TEST_CASE ("assistant: the editor ends idle drags on its tick and every drag when it closes", "[processor][assistant][gesture]")
+{
+    const JuceScope juce;
+    AcceptedMove m;
+    GestureLog log;
+    m.p->addListener (&log);
+    std::unique_ptr<juce::AudioProcessorEditor> editor (m.p->createEditor());
+    auto& e = dynamic_cast<ui::Strat3Editor&> (*editor);
+
+    // Sent a second ago on the editor's clock: the drag is over by the next tick.
+    const double now = juce::Time::getMillisecondCounterHiRes() / 1000.0;
+    REQUIRE (m.p->assistantCommand (m.depth (0.7), now - 1.0));
+    REQUIRE (log.begun == m.changes);
+    CHECK (log.ended == 0);
+    e.tick (1.0f / 30.0f);
+    CHECK (log.ended == m.changes);
+
+    // A drag still under way when the editor closes.
+    REQUIRE (m.p->assistantCommand (m.depth (0.6), juce::Time::getMillisecondCounterHiRes() / 1000.0 + 60.0));
+    REQUIRE (log.begun == 2 * m.changes);
+    e.tick (1.0f / 30.0f);
+    CHECK (log.ended == m.changes);   // under way: the tick leaves it open
+    editor.reset();
+    CHECK (log.ended == 2 * m.changes);
+    m.p->removeListener (&log);
 }

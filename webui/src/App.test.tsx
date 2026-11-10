@@ -10,9 +10,11 @@ import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { App } from './App'
+import { createAdvancedStore } from './bridge/advanced'
 import { connect } from './bridge/juce'
+import { connectRelays } from './bridge/relays'
 import { createSessionStore } from './bridge/session'
-import { createFakeBackend } from './test/fakeBackend'
+import { createFakeBackend, initialisationData } from './test/fakeBackend'
 import { raw, type FixtureName } from './test/fixtures'
 
 const setUp = (first?: FixtureName) => {
@@ -185,5 +187,38 @@ describe('App: visibility', () => {
     unmount()
     setVisibility('visible')
     expect(fake.readyCount()).toBe(before)
+  })
+})
+
+describe('App: the advanced view (module 21d)', () => {
+  const setUpWithAdvanced = () => {
+    const fake = createFakeBackend()
+    const host = { __JUCE__: { backend: fake.backend, initialisationData: initialisationData() } }
+    const bridge = connect(host)
+    const relays = connectRelays(host)
+    if (relays === null) throw new Error('no relays')
+    render(<App store={createSessionStore(bridge)} advanced={{ store: createAdvancedStore(bridge), relays }} />)
+    act(() => fake.deliver('assistantState', raw('idle')))
+    return { fake }
+  }
+
+  it('is the third tab inside the plugin', () => {
+    setUpWithAdvanced()
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Assistant', 'Target', 'Advanced'])
+    fireEvent.click(tab('Advanced'))
+    expect(tab('Advanced').getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByRole('region', { name: 'Crossover' })).toBeTruthy()
+  })
+
+  it('opens when the plugin says the gear was pressed', () => {
+    const { fake } = setUpWithAdvanced()
+    expect(tab('Assistant').getAttribute('aria-selected')).toBe('true')
+    act(() => fake.deliver('showView', { view: 'advanced' }))
+    expect(tab('Advanced').getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('is not there without the relays', () => {
+    setUp('idle')
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Assistant', 'Target'])
   })
 })

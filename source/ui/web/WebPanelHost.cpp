@@ -47,6 +47,85 @@ juce::File webViewDataFolder()
 
 } // namespace
 
+/** The advanced view's relays and their parameter attachments. The relays must exist before
+ *  the browser (they are part of its options) and outlive it; the attachments go first. */
+struct WebPanelHost::Relays
+{
+    std::vector<std::unique_ptr<juce::WebSliderRelay>> sliders;
+    std::vector<std::unique_ptr<juce::WebToggleButtonRelay>> toggles;
+    std::vector<std::unique_ptr<juce::WebComboBoxRelay>> combos;
+    std::vector<std::unique_ptr<juce::WebSliderParameterAttachment>> sliderAttachments;
+    std::vector<std::unique_ptr<juce::WebToggleButtonParameterAttachment>> toggleAttachments;
+    std::vector<std::unique_ptr<juce::WebComboBoxParameterAttachment>> comboAttachments;
+
+    Relays()
+    {
+        for (const auto& r : kAdvancedRelays)
+        {
+            switch (r.kind)
+            {
+                case RelayKind::Slider:   sliders.push_back (std::make_unique<juce::WebSliderRelay> (r.id)); break;
+                case RelayKind::Toggle:   toggles.push_back (std::make_unique<juce::WebToggleButtonRelay> (r.id)); break;
+                case RelayKind::ComboBox: combos.push_back (std::make_unique<juce::WebComboBoxRelay> (r.id)); break;
+            }
+        }
+    }
+
+    juce::WebBrowserComponent::Options addTo (juce::WebBrowserComponent::Options o)
+    {
+        for (auto& r : sliders)
+            o = o.withOptionsFrom (*r);
+        for (auto& r : toggles)
+            o = o.withOptionsFrom (*r);
+        for (auto& r : combos)
+            o = o.withOptionsFrom (*r);
+        return o;
+    }
+
+    void attach (juce::AudioProcessorValueTreeState& state)
+    {
+        std::size_t s = 0, t = 0, c = 0;
+        for (const auto& r : kAdvancedRelays)
+        {
+            auto* param = state.getParameter (r.id);
+            jassert (param != nullptr);   // test_advanced_link checks the table against the parameters
+            if (param == nullptr)
+                continue;
+            // No undo manager: the host's undo sees the gestures, as for the native controls.
+            switch (r.kind)
+            {
+                case RelayKind::Slider:
+                    sliderAttachments.push_back (std::make_unique<juce::WebSliderParameterAttachment> (*param, *sliders[s++], nullptr));
+                    break;
+                case RelayKind::Toggle:
+                    toggleAttachments.push_back (std::make_unique<juce::WebToggleButtonParameterAttachment> (*param, *toggles[t++], nullptr));
+                    break;
+                case RelayKind::ComboBox:
+                    comboAttachments.push_back (std::make_unique<juce::WebComboBoxParameterAttachment> (*param, *combos[c++], nullptr));
+                    break;
+            }
+        }
+    }
+
+    void detach()
+    {
+        sliderAttachments.clear();
+        toggleAttachments.clear();
+        comboAttachments.clear();
+    }
+
+    /** Sends every parameter again: a hidden WebView dropped the changes made meanwhile. */
+    void refresh()
+    {
+        for (auto& a : sliderAttachments)
+            a->sendInitialUpdate();
+        for (auto& a : toggleAttachments)
+            a->sendInitialUpdate();
+        for (auto& a : comboAttachments)
+            a->sendInitialUpdate();
+    }
+};
+
 juce::WebBrowserComponent::Options WebPanelHost::options (WebPanelHost* owner)
 {
     using Options = juce::WebBrowserComponent::Options;
@@ -63,7 +142,7 @@ juce::WebBrowserComponent::Options WebPanelHost::options (WebPanelHost* owner)
                  .withKeepPageLoadedWhenBrowserIsHidden();
     if (owner == nullptr)
         return o;   // only asked whether these options can work at all
-    return o.withResourceProvider ([owner] (const juce::String& path)
+    return owner->relays->addTo (o).withResourceProvider ([owner] (const juce::String& path)
                                    {
                                        owner->asked.push_back (path);
                                        auto r = panelResource (path, embedded);
@@ -78,23 +157,28 @@ juce::WebBrowserComponent::Options WebPanelHost::options (WebPanelHost* owner)
 bool WebPanelHost::supported() { return juce::WebBrowserComponent::areOptionsSupported (options (nullptr)); }
 
 WebPanelHost::WebPanelHost (processor::Strat3Processor& p)
-    : link (portFor (p), [this] (const juce::var& state)
+    : link (portFor (p), [this] (const char* eventId, const juce::var& payload)
             {
                 if (browser != nullptr)
-                    browser->emitEventIfBrowserIsVisible (kStateEvent, state);
+                    browser->emitEventIfBrowserIsVisible (eventId, payload);
             })
 {
     setTitle ("Assistant");
+    relays = std::make_unique<Relays>();
     browser = std::make_unique<juce::WebBrowserComponent> (options (this));
+    relays->attach (p.apvts);
     addAndMakeVisible (*browser);
     browser->goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
 }
 
 WebPanelHost::~WebPanelHost()
 {
-    // The WebView's callbacks point at this object: it goes first.
+    // The WebView's callbacks point at this object: it goes first, after the attachments
+    // (they listen to the relays) and before the relays (the browser tells them it went).
+    relays->detach();
     removeChildComponent (browser.get());
     browser.reset();
+    relays.reset();
 }
 
 void WebPanelHost::paint (juce::Graphics& g)
@@ -110,7 +194,10 @@ void WebPanelHost::resized()
 void WebPanelHost::visibilityChanged()
 {
     if (isVisible())
+    {
         link.shown();
+        relays->refresh();
+    }
 }
 
 void WebPanelHost::evaluate (const juce::String& script, std::function<void (const juce::var&)> done)

@@ -476,13 +476,36 @@ bool Strat3Processor::startAssistantCapture (assistant::CaptureKind kind, double
     return ok;
 }
 
-void Strat3Processor::applyParamSet (const assistant::ParamSet& set)
+void Strat3Processor::applyParamSet (const assistant::ParamSet& set, std::optional<double> dragAt)
 {
     for (const auto& [id, value] : set)
     {
         auto* param = apvts.getParameter (id);
         if (param == nullptr || ! std::isfinite (value))
             continue;   // a move saved by another build may name a parameter this one lacks
+        const auto open = dragGestures.find (id);
+        if (dragAt.has_value())
+        {
+            // The page sends a depth command every 50 ms while the slider is dragged. One
+            // gesture for the whole drag, so the host records one undo step, not twenty a second.
+            if (open == dragGestures.end())
+            {
+                param->beginChangeGesture();
+                dragGestures.emplace (id, *dragAt);
+            }
+            else
+            {
+                open->second = *dragAt;
+            }
+            param->setValueNotifyingHost (param->convertTo0to1 (value));
+            continue;
+        }
+        if (open != dragGestures.end())
+        {
+            // Accept or reject during a drag: the drag ends here, before this command's own step.
+            param->endChangeGesture();
+            dragGestures.erase (open);
+        }
         // One gesture per parameter: that is the unit hosts record for undo and automation.
         param->beginChangeGesture();
         param->setValueNotifyingHost (param->convertTo0to1 (value));
@@ -490,7 +513,33 @@ void Strat3Processor::applyParamSet (const assistant::ParamSet& set)
     }
 }
 
+void Strat3Processor::closeIdleAssistantGestures (double nowSec)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    for (auto it = dragGestures.begin(); it != dragGestures.end();)
+    {
+        if (nowSec - it->second < kDepthGestureIdleSec)
+        {
+            ++it;
+            continue;
+        }
+        if (auto* param = apvts.getParameter (it->first))
+            param->endChangeGesture();
+        it = dragGestures.erase (it);
+    }
+}
+
+void Strat3Processor::closeAssistantGestures()
+{
+    closeIdleAssistantGestures (std::numeric_limits<double>::infinity());
+}
+
 bool Strat3Processor::assistantCommand (const juce::var& command)
+{
+    return assistantCommand (command, juce::Time::getMillisecondCounterHiRes() / 1000.0);
+}
+
+bool Strat3Processor::assistantCommand (const juce::var& command, double nowSec)
 {
     JUCE_ASSERT_MESSAGE_THREAD
     const auto c = assistant::parseCommand (command);
@@ -539,7 +588,8 @@ bool Strat3Processor::assistantCommand (const juce::var& command)
         }
         assistantRev.store (session.revision);
     }
-    applyParamSet (set);   // outside the lock: parameter listeners run in here
+    // Outside the lock: parameter listeners run in here.
+    applyParamSet (set, c->type == assistant::CommandType::Depth ? std::optional<double> (nowSec) : std::nullopt);
     return ok;
 }
 

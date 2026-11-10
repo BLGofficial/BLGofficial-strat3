@@ -1,18 +1,29 @@
 // The page shell: says plainly when there is no usable link to the plugin, otherwise shows
-// the two panels as tabs with the capture strip between the tabs and the panel.
+// the panels as tabs with the capture strip between the tabs and the panel. The advanced view
+// is the third tab when the plugin has its relays (module 21d); the header gear opens it.
 import { useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
 
+import type { AdvancedStore } from './bridge/advanced'
+import type { Relays } from './bridge/relays'
 import type { Link, SessionStore } from './bridge/session'
 import { CaptureStrip, type PanelProps } from './components/CaptureStrip'
+import { Advanced } from './panels/Advanced'
 import { Assistant } from './panels/Assistant'
 import { Targets } from './panels/Targets'
 
-const TABS = [
+const ALL_TABS = [
   { id: 'assistant', label: 'Assistant' },
   { id: 'target', label: 'Target' },
+  { id: 'advanced', label: 'Advanced' },
 ] as const
 
-type PanelId = (typeof TABS)[number]['id']
+type PanelId = (typeof ALL_TABS)[number]['id']
+
+/** What the advanced view needs; absent outside the plugin. */
+export interface AdvancedLink {
+  readonly store: AdvancedStore
+  readonly relays: Relays
+}
 
 const NOTICES: Readonly<Record<Exclude<Link['status'], 'live'>, { title: string; text: string }>> = {
   unavailable: { title: 'Not connected', text: 'This panel runs inside the STRAT3 plugin window.' },
@@ -23,9 +34,12 @@ const NOTICES: Readonly<Record<Exclude<Link['status'], 'live'>, { title: string;
 /** The panel the address asks for: the native side can open the page on "#target". */
 const panelFromAddress = (): PanelId => (window.location.hash === '#target' ? 'target' : 'assistant')
 
-function Panels({ state, send }: PanelProps) {
+function Panels({ state, send, advanced }: PanelProps & { readonly advanced: AdvancedLink | undefined }) {
   const [panel, setPanel] = useState<PanelId>(panelFromAddress)
   const tabs = useRef(new Map<PanelId, HTMLButtonElement>())
+  const TABS = advanced === undefined ? ALL_TABS.filter((t) => t.id !== 'advanced') : ALL_TABS
+
+  useEffect(() => advanced?.store.onShowView(() => setPanel('advanced')), [advanced])
 
   const onKeyDown = (event: KeyboardEvent) => {
     const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
@@ -62,7 +76,9 @@ function Panels({ state, send }: PanelProps) {
       </div>
       <CaptureStrip state={state} send={send} />
       <div role="tabpanel" id={`panel-${panel}`} aria-labelledby={`tab-${panel}`} className="scroll min-h-0 flex-1 overflow-y-auto">
-        {panel === 'assistant' ? <Assistant state={state} send={send} /> : <Targets state={state} send={send} />}
+        {panel === 'assistant' && <Assistant state={state} send={send} />}
+        {panel === 'target' && <Targets state={state} send={send} />}
+        {panel === 'advanced' && advanced !== undefined && <Advanced info={advanced.store} relays={advanced.relays} />}
       </div>
     </div>
   )
@@ -71,8 +87,9 @@ function Panels({ state, send }: PanelProps) {
 /**
  * The page.
  * @param store the session store this page follows (created once, in main.tsx)
+ * @param advanced the advanced view's info and relays, inside the plugin only
  */
-export function App({ store }: { readonly store: SessionStore }) {
+export function App({ store, advanced }: { readonly store: SessionStore; readonly advanced?: AdvancedLink | undefined }) {
   const link = useSyncExternalStore(store.subscribe, store.getSnapshot)
 
   // The plugin drops state events while the panel is hidden, so what is on screen can be
@@ -94,5 +111,5 @@ export function App({ store }: { readonly store: SessionStore }) {
       </div>
     )
   }
-  return <Panels state={link.state} send={store.send} />
+  return <Panels state={link.state} send={store.send} advanced={advanced} />
 }

@@ -27,8 +27,10 @@
 #include <array>
 #include <atomic>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -129,6 +131,8 @@ public:
 
     engine::LatencyMode preparedMode() const noexcept { return static_cast<engine::LatencyMode> (preparedModeIndex.load()); }
     int preparedSatOs() const noexcept { return preparedOs.load(); }
+    /** Message thread (prepares run there). The sanitised rate, or 0 while not prepared. */
+    double preparedSampleRate() const noexcept { return prepared.load() ? config.sampleRate : 0.0; }
     const engine::Engine& getEngine() const noexcept { return *engine; }
 
     // ---- assistant (module 21a)
@@ -140,6 +144,19 @@ public:
      *  are set on the parameters inside begin/endChangeGesture, so host undo and automation
      *  see them. False if the command is malformed or does not apply; nothing changes then. */
     bool assistantCommand (const juce::var& command);
+    /** The same, at `nowSec` on the clock closeIdleAssistantGestures is given. A move's depth
+     *  slider sends a command every 50 ms while dragged; those share one gesture per
+     *  parameter, so one drag is one host undo step (module 21d). */
+    bool assistantCommand (const juce::var& command, double nowSec);
+    /** Message thread. Ends the depth gestures not touched for kDepthGestureIdleSec. */
+    void closeIdleAssistantGestures (double nowSec);
+    /** Message thread. Ends every open depth gesture (the panel went away). */
+    void closeAssistantGestures();
+    /** No movement for this long ends a drag [INFERRED own margin: 6 of the page's 50 ms
+     *  sends, longer than a hand pauses mid-drag]. */
+    static constexpr double kDepthGestureIdleSec = 0.3;
+    /** 0 (no sidechain bus), 1 or 2 channels, as prepared. */
+    int sidechainChannelCount() const noexcept { return sidechainChannels.load(); }
     /** Any thread but audio. The whole session as JSON for the panel. */
     juce::var assistantState();
     /** Changes whenever assistantState() would: the panel polls this, not the JSON. */
@@ -195,7 +212,10 @@ private:
     bool deltaHeard() const noexcept;                    // any thread: reads parameter atomics
     void feedAssistant (bool paused);                    // analysis thread, inside analysisTick
     assistant::ParamValues currentParamValues() const;   // any thread but audio (allocates)
-    void applyParamSet (const assistant::ParamSet&);     // message thread, no lock held
+    /** Message thread, no lock held. `dragAt`: a depth command at that time, whose gestures
+     *  stay open (dragGestures) until closeIdleAssistantGestures or another command. */
+    void applyParamSet (const assistant::ParamSet&, std::optional<double> dragAt = std::nullopt);
+    std::map<std::string, double> dragGestures;          // message thread: parameter id -> last touch (s)
 
     const bool runAnalysisThread;
     std::unique_ptr<AnalysisThread> analysisThread;

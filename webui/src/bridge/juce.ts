@@ -6,6 +6,7 @@
 //   assistantState    native -> page   the whole session (protocol/state.ts)
 //   assistantReady    page -> native   "send me the state now"
 //   assistantCommand  page -> native   one command object (protocol/commands.ts)
+// and, through on(), any other plugin event (the advanced view's: protocol/advanced.ts).
 //
 // Phase 5 named withNativeFunction for page -> native. That is the same event channel plus
 // a promise layer that lives in JUCE's own JS helper, which sits inside the JUCE checkout
@@ -32,6 +33,11 @@ export interface Bridge {
    * @returns the function that stops it
    */
   onState(listener: (payload: unknown) => void): () => void
+  /**
+   * Calls `listener` with every payload of one plugin event (unparsed).
+   * @returns the function that stops it
+   */
+  on(eventId: string, listener: (payload: unknown) => void): () => void
   /** Asks the plugin to send the state now. */
   requestState(): void
   send(command: Command): void
@@ -42,7 +48,8 @@ export interface Host {
   readonly __JUCE__?: { readonly backend?: unknown } | undefined
 }
 
-const isBackend = (v: unknown): v is JuceBackend => {
+/** @returns whether `v` has the three methods of JUCE's backend object */
+export const isBackend = (v: unknown): v is JuceBackend => {
   if (typeof v !== 'object' || v === null) return false
   const b = v as Record<string, unknown>
   return typeof b.addEventListener === 'function' && typeof b.removeEventListener === 'function' && typeof b.emitEvent === 'function'
@@ -56,11 +63,13 @@ const isBackend = (v: unknown): v is JuceBackend => {
 export function connect(host: Host = window as Host): Bridge | null {
   const backend = host.__JUCE__?.backend
   if (!isBackend(backend)) return null
+  const on = (eventId: string, listener: (payload: unknown) => void) => {
+    const token = backend.addEventListener(eventId, listener)
+    return () => backend.removeEventListener(token)
+  }
   return {
-    onState(listener) {
-      const token = backend.addEventListener(STATE_EVENT, listener)
-      return () => backend.removeEventListener(token)
-    },
+    onState: (listener) => on(STATE_EVENT, listener),
+    on,
     requestState: () => backend.emitEvent(READY_EVENT, null),
     send: (command) => backend.emitEvent(COMMAND_EVENT, command),
   }

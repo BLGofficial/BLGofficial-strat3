@@ -25,3 +25,10 @@ export const layerName = (layer: string): string => layer.toUpperCase()
 
 /** An axis frequency, e.g. 100 as "100" and 2500 as "2.5k". */
 export const axisHz = (hz: number): string => (hz >= 1000 ? `${Number((hz / 1000).toFixed(1))}k` : String(hz))
+
+/** A frequency as the advanced view shows it: whole Hz under 1 kHz, e.g. "120 Hz", then two
+ *  decimals of kHz, e.g. "1.00 kHz". Rounded first, so 999.6 Hz is "1.00 kHz", not "1000 Hz". */
+export const hz = (value: number): string => {
+  const whole = Math.round(value)
+  return whole < 1000 ? `${whole} Hz` : `${(value / 1000).toFixed(2)} kHz`
+}

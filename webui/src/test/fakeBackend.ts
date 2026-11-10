@@ -6,6 +6,7 @@
 // So everything crossing this double goes through JSON, as it does in the plugin: a NaN
 // becomes null and an undefined field disappears.
 import type { JuceBackend } from '../bridge/juce'
+import { RELAYS } from '../protocol/advanced'
 
 export interface Sent {
   readonly eventId: string
@@ -58,4 +59,14 @@ export function createFakeBackend(): FakeBackend {
     },
     listenerCount: (eventId) => listeners.get(eventId)?.size ?? 0,
   }
+}
+
+/**
+ * What JUCE puts in window.__JUCE__.initialisationData for the plugin's relays (JUCE 8.0.17,
+ * juce_WebControlRelays.cpp: withInitialisationData per relay, one list per kind).
+ * @param omit relay ids to leave out, as a plugin without them would
+ */
+export function initialisationData(omit: readonly string[] = []): Record<string, string[]> {
+  const of = (kind: string) => RELAYS.filter((r) => r.kind === kind && !omit.includes(r.id)).map((r) => r.id)
+  return { __juce__sliders: of('slider'), __juce__toggles: of('toggle'), __juce__comboBoxes: of('comboBox') }
 }

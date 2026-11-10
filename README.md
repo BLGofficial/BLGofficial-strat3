@@ -5,7 +5,7 @@ what every layer changes, delivery metering, and an assistant that proposes move
 it hears and explains each one.
 
 VST3, AU, CLAP and Standalone, built with JUCE 8 and C++20. The main editor is native JUCE;
-the assistant and target panels are React pages in a WebView (`webui/`).
+the assistant, target and advanced panels are React pages in a WebView (`webui/`).
 
 **Status: in development (version 0.1.0).** Not yet tested in a DAW, with pluginval or with
 clap-validator. See [Status](#status).
@@ -42,10 +42,20 @@ The assistant listens to a capture of 30 or 60 s of the plugin's output and prop
 tonal EQ (static or a dynamic dip), mono bass, limiter level for the chosen delivery target
 (-14, -11, -9 or -8 LUFS). Each proposal says why, what was measured and what it aims for.
 You accept, reject or scale it; nothing changes until you do. Moves decided before the latest
-analysis stay as read-only history.
+analysis stay as read-only history. Dragging a move's depth is one undo step in the host.
 
 The target is your own: play reference tracks through the plugin and capture them (up to
 16). Tonal moves need a target; the loudness and bass moves do not.
+
+## Advanced
+
+The gear in the header opens the advanced panel: the three crossover points, SATURATE's
+oversampling, dither type and bits, and MULTIBAND's sidechain source and high-pass. They are
+ordinary plugin parameters, so the host automates and undoes them as usual. The panel also
+says what the engine runs with when that differs from the settings: the crossover type
+(Linkwitz-Riley in TRACK and MIX, linear phase in MASTER), the points after the engine sorts
+and spaces them, oversampling capped at high sample rates, and an external sidechain the host
+has not connected.
 
 ## Building
 
@@ -97,7 +107,7 @@ cd webui && npm test                   # the panels (Vitest)
 
 With `STRAT3_BUILD_PLUGIN`, `STRAT3_BUILD_TESTS` and `STRAT3_WITH_WEBUI` all on, ctest also
 runs `webview_check`: the real editor in a window with the system WebView, clicking through
-the panels. When `xvfb-run` is installed (package `xvfb`) ctest runs it under that, so no
+the panels and moving parameters from the advanced panel. When `xvfb-run` is installed (package `xvfb`) ctest runs it under that, so no
 display is needed; it is skipped when no WebView can be started.
 
 The C++ side and the panels share one contract in `webui/contract/`: protocol states
@@ -128,13 +138,12 @@ cmake/          CPM (dependency fetching)
 ## Status
 
 Done and tested on Linux (x86_64, gcc 13): the DSP layers, the engine, the processor,
-metering, the native editor, the assistant session and protocol, and the assistant and target
-panels in the plugin window (WebKitGTK). Below 1100 px wide the panels open as a drawer from
-the header's ASSISTANT button. Without a working WebView the column says why and the rest of
+metering, the native editor, the assistant session and protocol, and the assistant, target and
+advanced panels in the plugin window (WebKitGTK). Below 1100 px wide the panels open as a
+drawer from the header's ASSISTANT button (or the gear, for the advanced panel). Without a working WebView the column says why and the rest of
 the plugin works as usual.
 
 Not done yet:
-- The advanced panel.
 - STEMS (stem-aware processing).
 - Importing references from audio files.
 - CPU readout per layer.

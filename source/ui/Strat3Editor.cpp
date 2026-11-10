@@ -42,6 +42,11 @@ Strat3Editor::Strat3Editor (processor::Strat3Processor& p)
     // After the stack: the drawer lies over it, so it must be in front.
     replacePanel (makeAssistantPanel (proc));
     header.drawerButton().onClick = [this] { setDrawerOpen (header.drawerButton().getToggleState()); };
+    header.advancedButton().onClick = [this]
+    {
+        setDrawerOpen (true);    // the page drops events while hidden: visible first
+        panel->showAdvanced();
+    };
 
     rebuildRows (proc.preparedOrder());
 
@@ -55,6 +60,7 @@ Strat3Editor::~Strat3Editor()
 {
     stopTimer();
     panel.reset();   // the WebView first: its callbacks reach into the processor
+    proc.closeAssistantGestures();   // a depth drag cut short by closing the window
     rows.clear();
     setLookAndFeel (nullptr);
 }
@@ -98,6 +104,7 @@ void Strat3Editor::replacePanel (std::unique_ptr<AssistantPanel> next)
         removeChildComponent (panel.get());
     panel = std::move (next);
     addChildComponent (*panel);
+    header.setAdvancedAvailable (panel->kind() == web::PanelKind::Web);
     if (getWidth() > 0)
         layoutPanel (computeLayout (getWidth(), getHeight()));
 }
@@ -351,7 +358,9 @@ void Strat3Editor::tick (float dt)
 
     updateMeters (dt, frameCount++ % 2 == 0);   // bars at 30 Hz, numbers at 15 Hz (Phase 4)
 
-    panel->tick (juce::Time::getMillisecondCounterHiRes() / 1000.0);
+    const double now = juce::Time::getMillisecondCounterHiRes() / 1000.0;   // the processor's command clock
+    panel->tick (now);
+    proc.closeIdleAssistantGestures (now);
     if (panel->failed())
         replacePanel (std::make_unique<PanelNotice> (web::PanelKind::DidNotLoad));
 }

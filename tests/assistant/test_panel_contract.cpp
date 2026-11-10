@@ -21,57 +21,17 @@
 #include <set>
 #include <string>
 
+#include "support/JsonDiff.h"
 #include "support/PanelScenarios.h"
 
 using namespace strat3::assistant;
 using Catch::Approx;
+using strat3::test::difference;
+using strat3::test::isNumber;
 
 namespace {
 
 juce::File contractDir() { return juce::File (STRAT3_PANEL_CONTRACT_DIR); }
-
-bool isNumber (const juce::var& v) { return v.isInt() || v.isInt64() || v.isDouble(); }
-
-/** Empty if the two JSON values agree, else the path and nature of the first difference. */
-std::string difference (const juce::var& committed, const juce::var& current, const std::string& path)
-{
-    if (current.isArray())
-    {
-        if (! committed.isArray() || committed.size() != current.size())
-            return path + ": array length";
-        for (int i = 0; i < current.size(); ++i)
-            if (auto d = difference (committed[i], current[i], path + "[" + std::to_string (i) + "]"); ! d.empty())
-                return d;
-        return {};
-    }
-    if (auto* now = current.getDynamicObject())
-    {
-        auto* then = committed.getDynamicObject();
-        if (then == nullptr || then->getProperties().size() != now->getProperties().size())
-            return path + ": fields";
-        for (const auto& prop : now->getProperties())
-        {
-            const auto name = prop.name.toString().toStdString();
-            if (! then->hasProperty (prop.name))
-                return path + "." + name + ": missing";
-            if (auto d = difference (then->getProperty (prop.name), prop.value, path + "." + name); ! d.empty())
-                return d;
-        }
-        return {};
-    }
-    if (current.isBool() || committed.isBool())
-        return current.isBool() && committed.isBool() && static_cast<bool> (current) == static_cast<bool> (committed) ? "" : path + ": boolean";
-    if (isNumber (current))
-    {
-        if (! isNumber (committed))
-            return path + ": not a number";
-        const double a = static_cast<double> (committed), b = static_cast<double> (current);
-        return std::abs (a - b) <= 1.0e-4 * std::max (1.0, std::abs (b)) ? "" : path + ": " + std::to_string (a) + " committed, " + std::to_string (b) + " now";
-    }
-    if (current.isString())
-        return committed.isString() && committed.toString() == current.toString() ? "" : path + ": text";
-    return path + ": unexpected type";
-}
 
 const char* name (CommandType t)
 {
