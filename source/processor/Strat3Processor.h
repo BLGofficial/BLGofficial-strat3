@@ -12,6 +12,13 @@
 //   any       setStateInformation (some hosts call it off the message thread): it only sets
 //             parameters and asks for a re-prepare
 //
+// Assistant session (module 21a): one Session behind assistantLock, shared by the analysis
+// thread (capture feed, proposals) and the message thread (commands, state for the panel).
+// Lock order is analysisLock -> assistantLock; parameters are never set while holding either
+// (a parameter listener may call back into the processor). The audio thread takes neither.
+// While a delta is heard the output taps carry the difference signal, not the mix, so the
+// capture is paused for that time plus kAssistantDeltaHoldTicks.
+//
 // Re-prepare while the host keeps calling processBlock: a Dekker handshake on two seq_cst
 // atomics (suspended / inProcess). The audio thread never waits: while suspended it outputs
 // silence. The message thread waits for at most the block in flight.
@@ -27,6 +34,7 @@
 
 #include "analysis/ImpactAnalyser.h"
 #include "analysis/Loudness1770.h"
+#include "assistant/Session.h"
 #include "engine/Engine.h"
 #include "processor/ParamBridge.h"
 
@@ -40,6 +48,10 @@ inline constexpr int kAnalysisHz = 30;
 inline constexpr float kCpuSmoothing = 0.1f;          // per block, one-pole on the load reading
 inline constexpr float kGainMatchGateLufs = -70.0f;   // below this (either side) keep the last offset
 inline constexpr float kMeterFloorDb = -100.0f;       // peaks of silence; also "nothing measured yet"
+// After a delta listen ends, its audio is still inside the analysis window (43 ms), the
+// chain's latency (up to ~150 ms in MASTER) and the 400 ms loudness gate: hold the assistant
+// capture for half a second more. Own tuning [INFERRED].
+inline constexpr int kAssistantDeltaHoldTicks = kAnalysisHz / 2;
 
 struct Meters
 {
@@ -119,7 +131,22 @@ public:
     int preparedSatOs() const noexcept { return preparedOs.load(); }
     const engine::Engine& getEngine() const noexcept { return *engine; }
 
-    /** Non-automatable state (layer order, later targets and the assistant log). Message thread. */
+    // ---- assistant (module 21a)
+    /** Message thread. Starts a capture of the output: ANALYSE ends in proposals, REFERENCE
+     *  adds one reference to the target. False if one is running, `seconds` is outside
+     *  (0, 60], or the reference list is full. */
+    bool startAssistantCapture (assistant::CaptureKind kind, double seconds);
+    /** Message thread. One JSON command from the panel (assistant/Protocol.h). Accepted moves
+     *  are set on the parameters inside begin/endChangeGesture, so host undo and automation
+     *  see them. False if the command is malformed or does not apply; nothing changes then. */
+    bool assistantCommand (const juce::var& command);
+    /** Any thread but audio. The whole session as JSON for the panel. */
+    juce::var assistantState();
+    /** Changes whenever assistantState() would: the panel polls this, not the JSON. */
+    std::uint32_t assistantRevision() const noexcept { return assistantRev.load(); }
+
+    /** Non-automatable state (layer order). The assistant session is saved next to it, from
+     *  the live session, not from this tree. Message thread. */
     juce::ValueTree extraState;
 
 private:
@@ -159,6 +186,16 @@ private:
     std::atomic<bool> inClipLatched { false }, outClipLatched { false };
     void publishMeters (const engine::BlockMeters&) noexcept;   // audio thread
     void resetMeters() noexcept;
+
+    std::mutex assistantLock;                           // analysis tick vs message thread; never audio
+    assistant::Session session {};
+    std::atomic<std::uint32_t> assistantRev { 0 };
+    int deltaHoldTicks = 0;                              // analysis thread
+    std::atomic<bool> capturePaused { false };
+    bool deltaHeard() const noexcept;                    // any thread: reads parameter atomics
+    void feedAssistant (bool paused);                    // analysis thread, inside analysisTick
+    assistant::ParamValues currentParamValues() const;   // any thread but audio (allocates)
+    void applyParamSet (const assistant::ParamSet&);     // message thread, no lock held
 
     const bool runAnalysisThread;
     std::unique_ptr<AnalysisThread> analysisThread;

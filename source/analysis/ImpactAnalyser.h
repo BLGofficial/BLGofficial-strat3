@@ -194,6 +194,12 @@ struct ImpactAnalyser
     struct Smoothed { std::array<double, kImpactBands> preM {}, preS {}, postM {}, postS {}; };
     std::vector<Smoothed> smooth {};
     ImpactFrame current {};   // a layer without enough history keeps its last values
+    // Assistant feed: the last tap's raw (unsmoothed) energies of the newest window. `outEnd`
+    // is the window's end position, so a window is offered once: without new audio the same
+    // samples would otherwise be re-analysed every tick and fill a capture with copies.
+    std::array<double, kImpactBands> outM {}, outS {};
+    std::uint64_t outEnd = 0;
+    bool outFresh = false;
     TripleBuffer<ImpactFrame> out {};
 };
 
@@ -244,6 +250,10 @@ inline void prepare (ImpactAnalyser& a, double sampleRate, int layers)
     a.current = {};
     a.current.layers = a.layers;
     a.out.slot = {};
+    a.outM = {};
+    a.outS = {};
+    a.outEnd = 0;
+    a.outFresh = false;
 }
 
 /** Per-layer latency in samples (clamped to 100 ms). Call when the chain's latency changes. */
@@ -365,6 +375,13 @@ inline void computeFrame (ImpactAnalyser& a) noexcept
         const bool ok = impactdetail::bandEnergies (a, i + 1, end, qm, qs) && okPre;
         if (! ok)
             continue;   // a NaN in the window: keep the last smoothed state, never publish it
+        if (i == a.layers - 1 && end != a.outEnd)
+        {
+            a.outM = qm;
+            a.outS = qs;
+            a.outEnd = end;
+            a.outFresh = true;
+        }
         auto& s = a.smooth[li];
         for (std::size_t b = 0; b < kImpactBands; ++b)
         {
@@ -387,6 +404,19 @@ inline void computeFrame (ImpactAnalyser& a) noexcept
         back (a.out) = f;
         publish (a.out);
     }
+}
+
+/** Analysis thread. Mid and side band energies (mean squares) at the chain output for the
+ *  newest analysis window, raw. True once per window that saw new audio; false while there is
+ *  nothing new, not enough history, or a non-finite sample in the window. */
+inline bool takeOutputEnergies (ImpactAnalyser& a, std::array<double, kImpactBands>& mid, std::array<double, kImpactBands>& side) noexcept
+{
+    if (! a.outFresh)
+        return false;
+    a.outFresh = false;
+    mid = a.outM;
+    side = a.outS;
+    return true;
 }
 
 /** UI side: the newest published frame. Returns true if it is new since the last read. */

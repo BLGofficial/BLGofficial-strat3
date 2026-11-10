@@ -3,9 +3,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <thread>
 
+#include "assistant/Protocol.h"
+#include "assistant/SessionState.h"
 #include "params/ParameterLayout.h"
+#include "params/ParameterSpecs.h"
 #include "params/StateMigration.h"
 
 namespace strat3::processor {
@@ -75,6 +79,7 @@ Strat3Processor::Strat3Processor (bool runThread)
 {
     requestedOrder.store (encodeOrder (engineOrder (params::decodeLayerOrder (extraState))));
     preparedOrderCode.store (requestedOrder.load());
+    assistant::prepare (session);
     if (runAnalysisThread)
     {
         analysisThread = std::make_unique<AnalysisThread> (*this);
@@ -306,9 +311,25 @@ void Strat3Processor::analysisTick()
     if (configPending())
         triggerAsyncUpdate();   // the re-prepare runs on the message thread
 
+    if (deltaHeard())
+        deltaHoldTicks = kAssistantDeltaHoldTicks;
+    else if (deltaHoldTicks > 0)
+        --deltaHoldTicks;
+    const bool capturePause = deltaHoldTicks > 0;
+
     auto& e = *engine;
     analysis::drain (loudIn, e.loudIn);
-    analysis::drain (loudOut, e.loudOut);
+    {
+        // Not analysis::drain: a running capture measures its own LUFS-I from the same blocks.
+        const std::lock_guard assistantGuard (assistantLock);
+        double block = 0.0;
+        while (analysis::pop (e.loudOut, block))
+        {
+            analysis::addBlock (loudOut, block);
+            if (! capturePause)
+                assistant::addLoudnessBlock (session, block);
+        }
+    }
     const float inS = analysis::shortTermLufs (loudIn);
     const float outS = analysis::shortTermLufs (loudOut);
     mLufs.store (analysis::momentaryLufs (loudOut));
@@ -327,6 +348,7 @@ void Strat3Processor::analysisTick()
 
     analysis::pull (*impact, e.capture);
     analysis::computeFrame (*impact);
+    feedAssistant (capturePause);
 
     engine::requestDesigns (e, readParams (params, monoLayout.load()));
 }
@@ -405,6 +427,128 @@ bool Strat3Processor::readImpact (analysis::ImpactFrame& out)
     return prepared.load() && analysis::readLatest (*impact, out);
 }
 
+// ------------------------------------------------------------------- assistant
+
+assistant::ParamValues Strat3Processor::currentParamValues() const
+{
+    assistant::ParamValues values;
+    for (const auto& spec : params::allSpecs())
+        if (const auto* raw = apvts.getRawParameterValue (spec.id))
+            values[spec.id] = raw->load();
+    return values;
+}
+
+bool Strat3Processor::deltaHeard() const noexcept
+{
+    // Same rule as engine::setMonitorTargets: any layer's delta, or the global one.
+    if (params.globalDelta->load (std::memory_order_relaxed) >= 0.5f)
+        return true;
+    for (const auto& layer : params.layer)
+        if (layer.delta->load (std::memory_order_relaxed) >= 0.5f)
+            return true;
+    return false;
+}
+
+void Strat3Processor::feedAssistant (bool paused)
+{
+    // Always taken, capture or not: a window analysed before a capture starts (or during a
+    // pause) must not become a frame later.
+    assistant::BandEnergies mid {}, side {};
+    const bool fresh = analysis::takeOutputEnergies (*impact, mid, side);
+    const bool wasPaused = capturePaused.exchange (paused);
+    const std::lock_guard lock (assistantLock);
+    if (session.capturing == assistant::CaptureKind::None)
+        return;
+    if (wasPaused != paused)
+        ++session.revision;   // the panel shows why the progress stopped
+    if (fresh && ! paused)
+        assistant::addFrame (session, mid, side, outCorrelation.load (std::memory_order_relaxed));
+    if (assistant::captureComplete (session))
+        assistant::completeCapture (session, currentParamValues());
+    assistantRev.store (session.revision);
+}
+
+bool Strat3Processor::startAssistantCapture (assistant::CaptureKind kind, double seconds)
+{
+    const std::lock_guard lock (assistantLock);
+    const bool ok = assistant::startCapture (session, kind, seconds);
+    assistantRev.store (session.revision);
+    return ok;
+}
+
+void Strat3Processor::applyParamSet (const assistant::ParamSet& set)
+{
+    for (const auto& [id, value] : set)
+    {
+        auto* param = apvts.getParameter (id);
+        if (param == nullptr || ! std::isfinite (value))
+            continue;   // a move saved by another build may name a parameter this one lacks
+        // One gesture per parameter: that is the unit hosts record for undo and automation.
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (param->convertTo0to1 (value));
+        param->endChangeGesture();
+    }
+}
+
+bool Strat3Processor::assistantCommand (const juce::var& command)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    const auto c = assistant::parseCommand (command);
+    if (! c.has_value())
+        return false;
+
+    assistant::ParamSet set;
+    bool ok = true;
+    {
+        const std::lock_guard lock (assistantLock);
+        using assistant::CommandType;
+        switch (c->type)
+        {
+            case CommandType::Analyse:
+                ok = assistant::startCapture (session, assistant::CaptureKind::Analyse, c->seconds);
+                break;
+            case CommandType::CaptureReference:
+                ok = assistant::startCapture (session, assistant::CaptureKind::Reference, c->seconds);
+                break;
+            case CommandType::Cancel:
+                ok = session.capturing != assistant::CaptureKind::None;
+                assistant::cancelCapture (session);
+                break;
+            case CommandType::ClearTarget:
+                assistant::clearTarget (session);
+                break;
+            case CommandType::ApplyAll:
+                set = assistant::applyAll (session);
+                break;
+            case CommandType::Accept:
+            case CommandType::Reject:
+            case CommandType::Depth:
+            {
+                const auto* move = assistant::findMove (session, c->id);
+                ok = move != nullptr && ! move->locked;   // locked: history from before the last analysis
+                if (! ok)
+                    break;
+                if (c->type == CommandType::Accept)
+                    set = assistant::accept (session, c->id, c->hasDepth ? c->depth : move->depth);
+                else if (c->type == CommandType::Reject)
+                    set = assistant::reject (session, c->id);
+                else
+                    set = assistant::setDepth (session, c->id, c->depth);
+                break;
+            }
+        }
+        assistantRev.store (session.revision);
+    }
+    applyParamSet (set);   // outside the lock: parameter listeners run in here
+    return ok;
+}
+
+juce::var Strat3Processor::assistantState()
+{
+    const std::lock_guard lock (assistantLock);
+    return assistant::stateToVar (session, capturePaused.load());
+}
+
 // ------------------------------------------------------------------- editor and state
 
 juce::AudioProcessorEditor* Strat3Processor::createEditor()
@@ -414,7 +558,12 @@ juce::AudioProcessorEditor* Strat3Processor::createEditor()
 
 void Strat3Processor::getStateInformation (juce::MemoryBlock& dest)
 {
-    const auto envelope = params::wrapState (apvts.copyState(), extraState);
+    auto extra = extraState.createCopy();
+    {
+        const std::lock_guard lock (assistantLock);
+        extra.appendChild (assistant::toTree (session), nullptr);
+    }
+    const auto envelope = params::wrapState (apvts.copyState(), extra);
     if (const auto xml = envelope.createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -431,7 +580,17 @@ void Strat3Processor::setStateInformation (const void* data, int sizeInBytes)
     if (! tree.isValid())   // unwrapParameters only returns a child of the APVTS type
         return;
     apvts.replaceState (tree);
-    extraState = params::unwrapExtra (*migrated);
+    // The session is loaded into the live object and taken out of the tree, so there is one
+    // copy of it: the next save writes the session as it is then.
+    auto extra = params::unwrapExtra (*migrated).createCopy();
+    const auto saved = extra.getChildWithName (assistant::kAssistantType);
+    {
+        const std::lock_guard lock (assistantLock);
+        assistant::fromTree (session, saved);
+        assistantRev.store (session.revision);
+    }
+    extra.removeChild (saved, nullptr);
+    extraState = extra;
     requestedOrder.store (encodeOrder (engineOrder (params::decodeLayerOrder (extraState))));
     if (prepared.load() && configPending())
         triggerAsyncUpdate();
