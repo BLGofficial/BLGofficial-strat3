@@ -1,0 +1,16 @@
+[
+  { "call": "analyse(30)", "command": { "type": "analyse", "seconds": 30 } },
+  { "call": "analyse(60)", "command": { "type": "analyse", "seconds": 60 } },
+  { "call": "captureReference(30)", "command": { "type": "captureReference", "seconds": 30 } },
+  { "call": "captureReference(60)", "command": { "type": "captureReference", "seconds": 60 } },
+  { "call": "cancel()", "command": { "type": "cancel" } },
+  { "call": "accept(7)", "command": { "type": "accept", "id": 7 } },
+  { "call": "reject(7)", "command": { "type": "reject", "id": 7 } },
+  { "call": "depth(7, 0.35)", "command": { "type": "depth", "id": 7, "depth": 0.35 } },
+  { "call": "depth(7, 0)", "command": { "type": "depth", "id": 7, "depth": 0 } },
+  { "call": "depth(7, 1)", "command": { "type": "depth", "id": 7, "depth": 1 } },
+  { "call": "depth(7, 1.7)", "command": { "type": "depth", "id": 7, "depth": 1 } },
+  { "call": "depth(7, -0.2)", "command": { "type": "depth", "id": 7, "depth": 0 } },
+  { "call": "applyAll()", "command": { "type": "applyAll" } },
+  { "call": "clearTarget()", "command": { "type": "clearTarget" } }
+]

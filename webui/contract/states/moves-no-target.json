@@ -1,0 +1,75 @@
+{
+  "revision": 902,
+  "capture": {
+    "kind": "none",
+    "progress": 0.0,
+    "seconds": 0.0,
+    "paused": false
+  },
+  "result": "moves",
+  "target": {
+    "captured": false,
+    "references": 0,
+    "maxReferences": 16,
+    "levelDb": [],
+    "bandHz": []
+  },
+  "moves": [
+    {
+      "id": 1,
+      "layer": "low",
+      "status": "pending",
+      "depth": 1.0,
+      "locked": false,
+      "reason": "mono bass below 120 Hz: side -7.0 dB vs -10 dB max",
+      "metric": "side/mid below 120 Hz (dB)",
+      "metricBefore": -7.0,
+      "metricTarget": -10.0,
+      "changes": [
+        {
+          "paramId": "low.on",
+          "from": 0.0,
+          "to": 1.0,
+          "scaled": false
+        },
+        {
+          "paramId": "low.monoOn",
+          "from": 0.0,
+          "to": 1.0,
+          "scaled": false
+        },
+        {
+          "paramId": "low.monoFreq",
+          "from": 100.0,
+          "to": 120.0,
+          "scaled": false
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "layer": "limit",
+      "status": "pending",
+      "depth": 1.0,
+      "locked": false,
+      "reason": "limiter threshold -3.2 dB: -17.2 LUFS-I vs -14 target (open-loop estimate)",
+      "metric": "integrated LUFS",
+      "metricBefore": -17.200000762939453,
+      "metricTarget": -14.0,
+      "changes": [
+        {
+          "paramId": "limit.on",
+          "from": 0.0,
+          "to": 1.0,
+          "scaled": false
+        },
+        {
+          "paramId": "limit.thresh",
+          "from": 0.0,
+          "to": -3.200000762939453,
+          "scaled": true
+        }
+      ]
+    }
+  ]
+}

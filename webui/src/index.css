@@ -1,0 +1,129 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Phase 4 look, as in the native editor: square corners, 1 px rules, flat colour.
+   No flex `gap` anywhere: the system WebView on an older macOS predates it. */
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply m-0 overflow-hidden bg-base font-label text-body text-text antialiased;
+    /* A plugin panel, not a document: dragging must not select text. */
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+  }
+
+  :focus-visible {
+    outline: 1px solid theme('colors.text');
+    outline-offset: 1px;
+  }
+
+  summary {
+    cursor: default;
+  }
+}
+
+@layer components {
+  .label {
+    @apply font-label text-label font-bold uppercase text-muted;
+  }
+
+  /* Inside an upper-cased label: a unit symbol keeps its own case ("s", not "S"). */
+  .unit {
+    text-transform: none;
+  }
+
+  .num {
+    @apply font-mono text-body;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .btn {
+    @apply h-6 border border-rule bg-row px-2 font-label text-label font-bold uppercase text-text;
+  }
+
+  .btn:hover:not(:disabled) {
+    @apply bg-row-selected;
+  }
+
+  .btn:active:not(:disabled) {
+    @apply border-text;
+  }
+
+  .btn:disabled {
+    @apply text-secondary;
+  }
+
+  .btn-signal:not(:disabled) {
+    @apply border-signal text-signal;
+  }
+
+  .scroll {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.rule') theme('colors.base');
+  }
+
+  .scroll::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .scroll::-webkit-scrollbar-thumb {
+    background: theme('colors.rule');
+  }
+
+  /* Depth slider. The filled part is a hard-edged two-colour background, driven by --fill
+     (set inline from the value): WebKit has no pseudo-element for the filled side. */
+  .depth {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 16px;
+    margin: 0;
+    background: transparent;
+    --fill-colour: theme('colors.text');
+  }
+
+  .depth[data-live='true'] {
+    --fill-colour: theme('colors.signal');
+  }
+
+  .depth::-webkit-slider-runnable-track {
+    height: 4px;
+    background: linear-gradient(to right, var(--fill-colour) var(--fill), theme('colors.rule') var(--fill));
+  }
+
+  .depth::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 8px;
+    height: 16px;
+    margin-top: -6px;
+    border: 0;
+    border-radius: 0;
+    background: theme('colors.text');
+  }
+
+  .depth::-moz-range-track {
+    height: 4px;
+    background: theme('colors.rule');
+  }
+
+  .depth::-moz-range-progress {
+    height: 4px;
+    background: var(--fill-colour);
+  }
+
+  .depth::-moz-range-thumb {
+    width: 8px;
+    height: 16px;
+    border: 0;
+    border-radius: 0;
+    background: theme('colors.text');
+  }
+}
