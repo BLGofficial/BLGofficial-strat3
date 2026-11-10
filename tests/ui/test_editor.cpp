@@ -1,4 +1,4 @@
-// Native editor (module 19c): the Phase 4 window without the WebView panels.
+// Native editor (module 19c), with the assistant column (module 21c).
 // Layout chosen by Blago 2026-11-04: vertical layer stack + impact strips + delivery bar; from
 // the ARCHON reference only the clip LEDs, the linked I/O trim and the loudness readouts.
 // Contracts tested here (headless: the components are driven directly, nothing is shown):
@@ -12,6 +12,10 @@
 //   - controls carry the Phase 4 accessibility labels
 //   - a headless render paints the theme (and is saved as a preview PNG)
 //   - the editor can tick and close while the audio thread runs
+//   - the assistant column (21c): beside the stack from 1100 px wide; below that a drawer
+//     the header opens over the right of the stack, closed whenever the window narrows.
+//     These tests build without the WebView, so the column holds the native notice saying
+//     the panels are not in this build; the WebView itself is checked by the webview app
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -135,11 +139,13 @@ TEST_CASE ("editor: the processor opens it; regions follow the layout model", "[
     CHECK (e.isResizable());
 
     e.setSize (1400, 900);
-    const auto l = ui::computeLayout (1400, 900, false);
+    const auto l = ui::computeLayout (1400, 900);
     auto same = [] (juce::Rectangle<int> a, ui::Rect b) { return a.getX() == b.x && a.getY() == b.y && a.getWidth() == b.w && a.getHeight() == b.h; };
     CHECK (same (e.headerBounds(), l.header));
     CHECK (same (e.stackBounds(), l.stack));
     CHECK (same (e.deliveryBounds(), l.delivery));
+    CHECK (same (e.panelBounds(), l.assist));
+    CHECK (e.panelShown());
 }
 
 TEST_CASE ("editor: rows follow the prepared order and rebuild after a reorder", "[ui][editor]")
@@ -349,7 +355,7 @@ TEST_CASE ("editor: a headless render paints the theme", "[ui][editor][render]")
     const auto img = e.createComponentSnapshot (e.getLocalBounds(), true, 1.0f);
     REQUIRE (img.getWidth() == 1400);
 
-    const auto l = ui::computeLayout (1400, 900, false);
+    const auto l = ui::computeLayout (1400, 900);
     CHECK (pixel (img, l.header.right() - 2, l.header.y + 1) == ui::theme::kBase);   // header background
     // The left marker: filled in the signal colour on an active layer, not on an off one.
     auto markerAt = [&] (engine::DepthLayer k)
@@ -362,6 +368,154 @@ TEST_CASE ("editor: a headless render paints the theme", "[ui][editor][render]")
     juce::FileOutputStream os (out);
     REQUIRE (os.openedOk());
     CHECK (juce::PNGImageFormat().writeImageToStream (img, os));
+}
+
+TEST_CASE ("editor: the assistant column holds the panel beside the stack", "[ui][editor][panel]")
+{
+    Fixture f;
+    auto& e = *f.editor;
+    auto same = [] (juce::Rectangle<int> a, ui::Rect b) { return a.getX() == b.x && a.getY() == b.y && a.getWidth() == b.w && a.getHeight() == b.h; };
+    for (const auto& [w, h] : { std::pair { 1100, 600 }, std::pair { 1280, 800 }, std::pair { 2560, 1600 } })
+    {
+        INFO ("size " << w << " x " << h);
+        e.setSize (w, h);
+        const auto l = ui::computeLayout (w, h);
+        CHECK_FALSE (e.drawerMode());
+        CHECK (e.panelShown());
+        CHECK (same (e.panelBounds(), l.assist));
+        CHECK (same (e.stackBounds(), l.stack));
+        CHECK_FALSE (e.drawerButton().isVisible());
+        e.setDrawerOpen (true);   // nothing to open while the column fits
+        CHECK_FALSE (e.drawerOpen());
+    }
+}
+
+TEST_CASE ("editor: below 1100 px the panel is a drawer the header opens", "[ui][editor][panel]")
+{
+    Fixture f;
+    auto& e = *f.editor;
+    auto same = [] (juce::Rectangle<int> a, ui::Rect b) { return a.getX() == b.x && a.getY() == b.y && a.getWidth() == b.w && a.getHeight() == b.h; };
+    e.setSize (1000, 700);
+    const auto l = ui::computeLayout (1000, 700);
+    CHECK (e.drawerMode());
+    CHECK (same (e.stackBounds(), l.stack));   // the stack keeps the full width
+    CHECK (l.stack.w == 1000);
+    CHECK_FALSE (e.drawerOpen());
+    CHECK_FALSE (e.panelShown());
+    CHECK (e.drawerButton().isVisible());
+    CHECK (e.drawerButton().getTitle() == "Assistant");
+    CHECK_FALSE (e.drawerButton().getToggleState());
+
+    e.drawerButton().setToggleState (true, juce::sendNotificationSync);   // as a click does
+    CHECK (e.drawerOpen());
+    CHECK (e.panelShown());
+    CHECK (e.drawerButton().getToggleState());
+    CHECK (same (e.panelBounds(), ui::drawerBounds (l)));
+    CHECK (same (e.stackBounds(), l.stack));   // the drawer lies over the stack, it does not push it
+    // Over the stack, so it must be in front of it.
+    CHECK (e.getIndexOfChildComponent (e.panelComponent()) > e.getIndexOfChildComponent (e.stackComponent()));
+
+    e.setDrawerOpen (false);
+    CHECK_FALSE (e.panelShown());
+    CHECK_FALSE (e.drawerButton().getToggleState());
+}
+
+TEST_CASE ("editor: the drawer closes when the window narrows and the column returns when it widens", "[ui][editor][panel]")
+{
+    Fixture f;
+    auto& e = *f.editor;
+    e.setSize (1000, 700);
+    e.setDrawerOpen (true);
+    REQUIRE (e.panelShown());
+
+    e.setSize (1400, 800);   // wide: a column, whatever the drawer was
+    CHECK_FALSE (e.drawerMode());
+    CHECK (e.panelShown());
+    CHECK_FALSE (e.drawerButton().isVisible());
+
+    e.setSize (1050, 800);   // narrow again: the drawer starts closed
+    CHECK (e.drawerMode());
+    CHECK_FALSE (e.drawerOpen());
+    CHECK_FALSE (e.panelShown());
+
+    e.setDrawerOpen (true);
+    e.setSize (1080, 800);   // still narrow: an open drawer stays open
+    CHECK (e.drawerOpen());
+    CHECK (e.panelShown());
+}
+
+TEST_CASE ("editor: the header's drawer button overlaps nothing at any drawer width", "[ui][editor][panel]")
+{
+    Fixture f;
+    auto& e = *f.editor;
+    auto& button = e.drawerButton();
+    auto* header = button.getParentComponent();
+    REQUIRE (header != nullptr);
+    for (int w = 900; w < ui::kAssistCollapseW; w += 50)
+    {
+        INFO ("width " << w);
+        e.setSize (w, 700);
+        REQUIRE (button.isVisible());
+        CHECK (header->getLocalBounds().contains (button.getBounds()));
+        for (auto* other : header->getChildren())
+            if (other != &button && other->isVisible())
+            {
+                INFO ("sibling: " << other->getTitle() << " " << other->getName());
+                CHECK_FALSE (other->getBounds().intersects (button.getBounds()));
+            }
+    }
+}
+
+namespace {
+
+/** A WebView panel whose page never says it is ready: what a broken runtime looks like. */
+struct NeverLoads final : ui::AssistantPanel
+{
+    void tick (double) override { ++ticks; }
+    bool failed() const override { return ticks >= 2; }
+    ui::web::PanelKind kind() const override { return ui::web::PanelKind::Web; }
+    int ticks = 0;
+};
+
+} // namespace
+
+TEST_CASE ("editor: a panel that does not load is replaced by the notice", "[ui][editor][panel]")
+{
+    Fixture f;
+    auto& e = *f.editor;
+    e.setSize (1400, 900);
+    e.replacePanel (std::make_unique<NeverLoads>());
+    REQUIRE (e.panelKind() == ui::web::PanelKind::Web);
+    e.tick (1.0f / 30.0f);
+    CHECK (e.panelKind() == ui::web::PanelKind::Web);
+    e.tick (1.0f / 30.0f);
+    CHECK (e.panelKind() == ui::web::PanelKind::DidNotLoad);
+    CHECK (e.panelText() == ui::web::noticeFor (ui::web::PanelKind::DidNotLoad).body);
+    CHECK (e.panelShown());
+    const auto a = ui::computeLayout (1400, 900).assist;
+    CHECK (e.panelBounds() == juce::Rectangle<int> (a.x, a.y, a.w, a.h));   // in the column, not at 0,0
+}
+
+TEST_CASE ("editor: without the WebView panels the column says so", "[ui][editor][panel]")
+{
+    Fixture f;
+    auto& e = *f.editor;
+    e.setSize (1400, 900);
+    CHECK (e.panelKind() == ui::web::PanelKind::NotBuilt);
+    const auto notice = ui::web::noticeFor (ui::web::PanelKind::NotBuilt);
+    CHECK (e.panelTitle() == notice.title);
+    CHECK (e.panelText() == notice.body);
+
+    // Painted in the column: the notice is the theme's base colour with text on it, and
+    // nothing of it reaches into the stack.
+    const auto img = e.createComponentSnapshot (e.getLocalBounds(), true, 1.0f);
+    const auto l = ui::computeLayout (1400, 900);
+    CHECK (pixel (img, l.assist.x + l.assist.w / 2, l.assist.bottom() - 4) == ui::theme::kBase);
+    bool text = false;
+    for (int y = l.assist.y; y < l.assist.y + 120 && ! text; ++y)
+        for (int x = l.assist.x; x < l.assist.right() && ! text; ++x)
+            text = pixel (img, x, y) != ui::theme::kBase && pixel (img, x, y) != ui::theme::kRule;
+    CHECK (text);
 }
 
 TEST_CASE ("editor: ticks and closes while the audio thread runs", "[ui][editor][threads]")

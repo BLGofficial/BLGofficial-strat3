@@ -55,8 +55,9 @@ struct RowInfo { RowKind kind = RowKind::Layer; engine::DepthLayer layer = engin
 
 // ------------------------------------------------------------------------------ geometry
 
-/** Window regions for a requested size, clamped to the Phase 4 range. `assistant` false
- *  (the WebView panels are not built yet) gives its column to the stack. */
+/** Window regions for a requested size, clamped to the Phase 4 range. Below kAssistCollapseW
+ *  the assistant column becomes a drawer (drawerBounds) and the stack takes the full width.
+ *  `assistant` false gives no column and no drawer. */
 inline Layout computeLayout (int w, int h, bool assistant = true)
 {
     Layout l;
@@ -70,6 +71,13 @@ inline Layout computeLayout (int w, int h, bool assistant = true)
     l.assist = { l.stack.right(), kHeaderH, assistW, middleH };
     l.delivery = { 0, l.stack.bottom(), l.width, kDeliveryH };
     return l;
+}
+
+/** Where the open assistant drawer lies: over the right of the stack, as wide as the column
+ *  would be, so the panels see the same width in both modes. */
+inline Rect drawerBounds (const Layout& l)
+{
+    return { l.stack.right() - kAssistW, l.stack.y, kAssistW, l.stack.h };
 }
 
 /** Row rectangles in stack content coordinates; `expanded` (or -1) carries the editor. */

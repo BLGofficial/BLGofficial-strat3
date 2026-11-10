@@ -314,6 +314,20 @@ TEST_CASE ("keyboard row selection clamps; accessibility label names slot, layer
 
 // ---- module 19c additions: the editor's own behaviour that is not drawing
 
+TEST_CASE ("the assistant drawer lies over the right of the stack, the column's width", "[ui][model]")
+{
+    for (const auto& [w, h] : { std::pair { 900, 600 }, std::pair { 1099, 800 } })
+    {
+        const auto l = computeLayout (w, h);
+        REQUIRE (l.assistDrawer);
+        const auto d = drawerBounds (l);
+        CHECK (d.w == kAssistW);
+        CHECK (d.right() == l.stack.right());
+        CHECK (d.y == l.stack.y);
+        CHECK (d.h == l.stack.h);
+    }
+}
+
 TEST_CASE ("layout without the assistant gives the stack the full width", "[ui][model]")
 {
     const auto l = computeLayout (1400, 900, false);
