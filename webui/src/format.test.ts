@@ -7,7 +7,7 @@
 //   - layerName / axisHz: short upper-case labels
 import { describe, expect, it } from 'vitest'
 
-import { axisHz, elapsed, fixed1, layerName, percent, plain } from './format'
+import { axisHz, elapsed, fixed1, hz, layerName, percent, plain } from './format'
 
 describe('format', () => {
   it.each([
@@ -64,5 +64,17 @@ describe('format', () => {
     [2500, '2.5k'],
   ])('axisHz(%s) is %s', (hz, text) => {
     expect(axisHz(hz)).toBe(text)
+  })
+})
+
+describe('hz (module 21d)', () => {
+  it('is whole Hz under 1 kHz and kHz with two decimals from there', () => {
+    expect(hz(120)).toBe('120 Hz')
+    expect(hz(299.99997)).toBe('300 Hz')
+    expect(hz(999.4)).toBe('999 Hz')
+    expect(hz(999.6)).toBe('1.00 kHz')
+    expect(hz(1000)).toBe('1.00 kHz')
+    expect(hz(4999.9995)).toBe('5.00 kHz')
+    expect(hz(16000)).toBe('16.00 kHz')
   })
 })

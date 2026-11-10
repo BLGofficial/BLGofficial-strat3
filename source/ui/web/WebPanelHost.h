@@ -1,6 +1,8 @@
 #pragma once
 // The assistant column as a WebView (module 21c): JUCE's WebBrowserComponent showing the
 // embedded React bundle (webui/), linked to the processor's assistant session by PanelLink.
+// Module 21d adds the advanced view's parameters: one JUCE control relay per entry of
+// kAdvancedRelays (AdvancedLink.h), attached to the processor's parameters.
 // Only in a build with the panels (STRAT3_WITH_WEBUI) and the WebView (JUCE_WEB_BROWSER);
 // otherwise makeAssistantPanel gives the native notice. Message thread only.
 #include <functional>
@@ -34,6 +36,7 @@ public:
     static bool supported();
 
     void tick (double nowSec) override { link.tick (nowSec); }
+    void showAdvanced() override { link.showAdvanced(); }
     bool failed() const override { return link.failed(); }
     PanelKind kind() const override { return PanelKind::Web; }
     void paint (juce::Graphics&) override;
@@ -49,8 +52,12 @@ public:
 private:
     static juce::WebBrowserComponent::Options options (WebPanelHost* owner);
 
+    struct Relays;
+
     PanelLink link;
     std::vector<juce::String> asked;   // every path the page requested, in order
+    // Before the browser: its options name the relays, and it tells them when it goes.
+    std::unique_ptr<Relays> relays;
     std::unique_ptr<juce::WebBrowserComponent> browser;
 };
 

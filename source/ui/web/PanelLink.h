@@ -6,6 +6,8 @@
 //   page -> native  "assistantReady"    payload ignored: "send me the state"
 //                   "assistantCommand"  one command object for assistant::parseCommand
 //   native -> page  "assistantState"    the whole session (assistant::stateToVar)
+//                   "advancedInfo"      what the engine runs with (module 21d, AdvancedLink.h)
+//                   "showView"          open the advanced view (module 21d)
 // The page re-renders from every state it gets, so the link only has to make sure it gets one
 // after anything that changed, and never before it listens.
 //
@@ -21,6 +23,7 @@
 #include <vector>
 
 #include "processor/Strat3Processor.h"
+#include "ui/web/AdvancedLink.h"
 
 namespace strat3::ui::web {
 
@@ -86,6 +89,7 @@ struct SessionPort
     std::function<juce::var()> state;
     std::function<std::uint32_t()> revision;
     std::function<bool (const juce::var&)> command;
+    std::function<juce::var()> info;   // advancedInfo
 };
 
 /** The port for a real processor. Message thread, like everything in the link. */
@@ -93,22 +97,26 @@ inline SessionPort portFor (processor::Strat3Processor& p)
 {
     return { [&p] { return p.assistantState(); },
              [&p] { return p.assistantRevision(); },
-             [&p] (const juce::var& c) { return p.assistantCommand (c); } };
+             [&p] (const juce::var& c) { return p.assistantCommand (c); },
+             [&p] { return advancedInfo (p); } };
 }
 
 /** Keeps the page's view of the session current. Message thread only. */
 class PanelLink
 {
 public:
-    using Emit = std::function<void (const juce::var& state)>;
+    using Emit = std::function<void (const char* eventId, const juce::var& payload)>;
 
     PanelLink (SessionPort portIn, Emit emitIn) : port (std::move (portIn)), emit (std::move (emitIn)) {}
 
-    /** The page says it listens (on load, and again after a reload): it gets the state now. */
+    /** The page says it listens (on load, and again after a reload): it gets the state now,
+     *  and the advanced view if the gear was pressed while it loaded. */
     void ready()
     {
         isReady = true;
         send();
+        if (std::exchange (viewPending, false))
+            emit (kViewEvent, viewPayload());
     }
 
     /** A command from the page. Answered with the state whether the processor took it or
@@ -133,6 +141,8 @@ public:
         }
         if (port.revision() != sentRevision)
             send();
+        else if (juce::JSON::toString (port.info(), true) != sentInfo)
+            sendInfo();
     }
 
     /** The panel became visible. A hidden WebView drops events, so whatever was sent while
@@ -141,6 +151,16 @@ public:
     {
         if (isReady)
             send();
+    }
+
+    /** The header's gear: the page opens its advanced view. Remembered while the page loads,
+     *  not replayed after a later reload (the press was long ago by then). */
+    void showAdvanced()
+    {
+        if (isReady)
+            emit (kViewEvent, viewPayload());
+        else
+            viewPending = true;
     }
 
     bool pageReady() const noexcept { return isReady; }
@@ -153,13 +173,30 @@ private:
         // Revision first: a change landing between the two reads is sent again next tick
         // rather than lost.
         sentRevision = port.revision();
-        emit (port.state());
+        emit (kStateEvent, port.state());
+        sendInfo();
+    }
+
+    void sendInfo()
+    {
+        const auto info = port.info();
+        // Compared as text: the info is a handful of numbers, and a var compares by identity.
+        sentInfo = juce::JSON::toString (info, true);
+        emit (kInfoEvent, info);
+    }
+
+    static juce::var viewPayload()
+    {
+        auto* o = new juce::DynamicObject;
+        o->setProperty ("view", "advanced");
+        return o;
     }
 
     SessionPort port;
     Emit emit;
-    bool isReady = false, loadFailed = false;
+    bool isReady = false, loadFailed = false, viewPending = false;
     std::uint32_t sentRevision = 0;
+    juce::String sentInfo;
     std::optional<double> firstTick;
 };
 

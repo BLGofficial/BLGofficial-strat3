@@ -16,6 +16,8 @@ public:
     /** True when the panel gave up (the page never loaded): the editor swaps in a notice. */
     virtual bool failed() const { return false; }
     virtual web::PanelKind kind() const = 0;
+    /** The header's gear (module 21d): show the advanced view. Only the WebView has one. */
+    virtual void showAdvanced() {}
 };
 
 /** The native stand-in: title and one paragraph, in the theme. */

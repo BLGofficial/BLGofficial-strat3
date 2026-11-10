@@ -66,6 +66,8 @@ public:
     /** Opens or closes the drawer; does nothing while the column fits. */
     void setDrawerOpen (bool);
     juce::TextButton& drawerButton() noexcept { return header.drawerButton(); }
+    /** The header's gear (module 21d): opens the column (or the drawer) on the advanced view. */
+    juce::Button& advancedButton() noexcept { return header.advancedButton(); }
     web::PanelKind panelKind() const { return panel->kind(); }
     /** The notice's text, empty when the WebView panels are shown. */
     juce::String panelTitle() const;

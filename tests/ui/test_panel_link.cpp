@@ -13,6 +13,10 @@
 //     events)
 //   - a page that never says it is ready within the load timeout counts as failed
 //   - which panel the editor shows: the WebView, or a notice saying why there is none
+//   - module 21d: the advanced info goes out with the state when the page is ready, then once
+//     per change, and again when shown; the gear's "open the advanced view" waits for the
+//     page to be ready and is sent once
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <map>
@@ -73,14 +77,41 @@ std::string text (const web::PanelResource& r)
     return { reinterpret_cast<const char*> (r.data.data()), r.data.size() };
 }
 
-/** A link bound to a real processor, recording every state it sends. */
+struct Event
+{
+    std::string id;
+    juce::var payload;
+};
+
+/** A link bound to a real processor, recording every event it sends. */
 struct Linked
 {
     JuceScope juce;
     std::unique_ptr<Strat3Processor> proc = makeProc();
-    std::vector<juce::var> sent;
-    web::PanelLink link { web::portFor (*proc), [this] (const juce::var& s) { sent.push_back (s); } };
+    std::vector<Event> events;
+    std::vector<juce::var> sent;   // the states among them
+    web::PanelLink link { web::portFor (*proc), [this] (const char* id, const juce::var& payload)
+                          {
+                              events.push_back ({ id, payload });
+                              if (std::string (id) == web::kStateEvent)
+                                  sent.push_back (payload);
+                          } };
+
+    std::vector<std::string> ids() const
+    {
+        std::vector<std::string> out;
+        for (const auto& e : events)
+            out.push_back (e.id);
+        return out;
+    }
 };
+
+void setParam (Strat3Processor& p, const char* id, float value)
+{
+    auto* param = p.apvts.getParameter (id);
+    REQUIRE (param != nullptr);
+    param->setValueNotifyingHost (param->convertTo0to1 (value));
+}
 
 } // namespace
 
@@ -266,4 +297,50 @@ TEST_CASE ("panel link: which panel the editor shows", "[ui][web]")
     CHECK (web::noticeFor (PanelKind::NotBuilt).body != web::noticeFor (PanelKind::NoWebView).body);
     CHECK (web::noticeFor (PanelKind::NoWebView).body != web::noticeFor (PanelKind::DidNotLoad).body);
     CHECK (web::noticeFor (PanelKind::Web).title.isEmpty());
+}
+
+TEST_CASE ("panel link: the advanced info goes with the state when ready, then once per change", "[ui][web]")
+{
+    using V = std::vector<std::string>;
+    Linked l;
+    l.link.tick (0.0);
+    CHECK (l.events.empty());   // nothing before the page listens
+
+    l.link.ready();
+    REQUIRE (l.ids() == V { web::kStateEvent, web::kInfoEvent });
+    CHECK (juce::JSON::toString (l.events[1].payload) == juce::JSON::toString (web::advancedInfo (*l.proc)));
+    CHECK (static_cast<double> (l.events[1].payload["crossovers"][0]) == Catch::Approx (120.0).margin (0.01));
+
+    for (int i = 1; i <= 5; ++i)
+        l.link.tick (0.1 * i);
+    CHECK (l.events.size() == 2);   // nothing changed
+
+    setParam (*l.proc, "xover.f1", 200.0f);
+    l.link.tick (1.0);
+    l.link.tick (1.1);
+    REQUIRE (l.ids() == V { web::kStateEvent, web::kInfoEvent, web::kInfoEvent });
+    CHECK (static_cast<double> (l.events[2].payload["crossovers"][0]) == Catch::Approx (200.0).margin (0.01));
+
+    l.link.shown();   // a hidden WebView dropped whatever was sent meanwhile
+    CHECK (l.ids() == V { web::kStateEvent, web::kInfoEvent, web::kInfoEvent, web::kStateEvent, web::kInfoEvent });
+}
+
+TEST_CASE ("panel link: the gear opens the advanced view once the page is ready", "[ui][web]")
+{
+    using V = std::vector<std::string>;
+    Linked l;
+    l.link.showAdvanced();   // the page is still loading: remembered, not sent
+    CHECK (l.events.empty());
+
+    l.link.ready();
+    REQUIRE (l.ids() == V { web::kStateEvent, web::kInfoEvent, web::kViewEvent });
+    CHECK (l.events[2].payload["view"].toString() == "advanced");
+
+    l.link.ready();   // a reload later: the old press is not replayed
+    CHECK (l.ids() == V { web::kStateEvent, web::kInfoEvent, web::kViewEvent, web::kStateEvent, web::kInfoEvent });
+
+    l.link.showAdvanced();   // ready: at once, and only the view
+    REQUIRE (l.events.size() == 6);
+    CHECK (l.events[5].id == web::kViewEvent);
+    CHECK (l.events[5].payload["view"].toString() == "advanced");
 }

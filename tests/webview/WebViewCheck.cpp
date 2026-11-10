@@ -8,7 +8,12 @@
 //   - a click in the page reaches the processor as a command, and the new state comes back
 //     to the page (Analyse, then Cancel)
 //   - the page asked for the three bundle files and nothing else
-//   - a state that changed while the drawer was closed is on screen when it opens
+//   - the header gear opens the advanced view (module 21d), which shows the processor's
+//     parameters through JUCE's relays: a drag on a crossover slider moves the parameter in
+//     one host gesture, a choice and the high-pass switch reach their parameters, and a
+//     parameter moved natively shows on the page
+//   - a state that changed while the drawer was closed is on screen when it opens, and the
+//     gear opens the closed drawer on the advanced view
 //   - the editor closes with the page loaded
 // Screenshots of the window can be taken from outside while it waits (STRAT3_WEBVIEW_HOLD_MS).
 #include <juce_gui_extra/juce_gui_extra.h>
@@ -44,6 +49,48 @@ juce::String clickScript (const juce::String& label)
            + juce::JSON::toString (label) + "); if (!b || b.disabled) return false; b.click(); return true; })()";
 }
 
+// A pointer drag on a range input, as the browser reports one: pointerdown on the slider,
+// input events while it moves (through the native setter, or React would not see them), and
+// pointerup wherever the hand is let go (here the document, outside the slider).
+juce::String dragScript (const juce::String& name, const juce::StringArray& positions)
+{
+    return "(() => { const s = document.querySelector('input[aria-label=' + " + juce::JSON::toString (juce::JSON::toString (name)) + " + ']');"
+           " if (!s || s.disabled) return false;"
+           " const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;"
+           " s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));"
+           " for (const p of [" + positions.joinIntoString (",") + "]) { set.call(s, String(p)); s.dispatchEvent(new Event('input', { bubbles: true })); }"
+           " document.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));"
+           " return true; })()";
+}
+
+juce::String sliderTextScript (const juce::String& name)
+{
+    return "(() => { const s = document.querySelector('input[aria-label=' + " + juce::JSON::toString (juce::JSON::toString (name)) + " + ']');"
+           " return s && !s.disabled ? s.getAttribute('aria-valuetext') : ''; })()";
+}
+
+juce::String clickTabScript (const juce::String& label)
+{
+    return "(() => { const t = [...document.querySelectorAll('[role=tab]')].find(x => x.textContent === " + juce::JSON::toString (label)
+           + "); if (!t) return false; t.click(); return true; })()";
+}
+
+juce::String selectedTabScript (const juce::String& label)
+{
+    return "(() => { const t = [...document.querySelectorAll('[role=tab]')].find(x => x.textContent === " + juce::JSON::toString (label)
+           + "); return t ? t.getAttribute('aria-selected') : ''; })()";
+}
+
+/** Counts the host gestures one parameter gets, as a host would see them. */
+struct GestureCount final : juce::AudioProcessorListener
+{
+    int index = -1, begun = 0, ended = 0;
+    void audioProcessorParameterChanged (juce::AudioProcessor*, int, float) override {}
+    void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
+    void audioProcessorParameterChangeGestureBegin (juce::AudioProcessor*, int i) override { begun += i == index; }
+    void audioProcessorParameterChangeGestureEnd (juce::AudioProcessor*, int i) override { ended += i == index; }
+};
+
 class Check final : public juce::JUCEApplication, private juce::Timer
 {
 public:
@@ -56,6 +103,8 @@ public:
         proc = std::make_unique<Strat3Processor> (false);
         proc->setRateAndBufferSizeDetails (48000.0, 512);
         proc->prepareToPlay (48000.0, 512);
+        gestures.index = proc->apvts.getParameter ("xover.f1")->getParameterIndex();
+        proc->addListener (&gestures);
         editor.reset (static_cast<Strat3Editor*> (proc->createEditor()));
 
         window = std::make_unique<juce::DocumentWindow> ("STRAT3", juce::Colours::black, 0);
@@ -84,7 +133,10 @@ public:
         editor.reset();   // before the processor, as a host does
         window.reset();
         if (proc != nullptr)
+        {
+            proc->removeListener (&gestures);
             proc->releaseResources();
+        }
         proc.reset();
     }
 
@@ -95,6 +147,7 @@ private:
     std::unique_ptr<Strat3Editor> editor;
     std::unique_ptr<juce::DocumentWindow> window;
     strat3::ui::web::WebPanelHost* host = nullptr;
+    GestureCount gestures;
 
     std::vector<Step> steps;
     std::size_t current = 0;
@@ -127,6 +180,20 @@ private:
 
     juce::String captureKind() const { return proc->assistantState()["capture"]["kind"].toString(); }
 
+    float param (const char* id) const { return proc->apvts.getRawParameterValue (id)->load(); }
+
+    void setParam (const char* id, float value)
+    {
+        auto* p = proc->apvts.getParameter (id);
+        p->setValueNotifyingHost (p->convertTo0to1 (value));
+    }
+
+    /** Runs `script` once and is done when it has answered `expected`. */
+    bool answered (const juce::var& expected)
+    {
+        return ! evalPending && lastEval == expected;
+    }
+
     void buildSteps()
     {
         steps.push_back ({ "the page loads from the bundle and says it is ready", [] {}, [this] { return host->pageReady(); }, 30.0 });
@@ -138,6 +205,33 @@ private:
         steps.push_back ({ "a click on Cancel ends the capture", [this] { eval (clickScript ("Cancel")); },
                            [this] { return captureKind() == "none"; } });
         steps.push_back ({ "the page says the capture was cancelled", [] {}, [this] { return pageShows ("Capture cancelled."); } });
+
+        // The advanced view (module 21d).
+        steps.push_back ({ "the header gear opens the advanced view", [this] { editor->advancedButton().triggerClick(); },
+                           [this] { return pageShows ("Crossover") && pageShows ("Linkwitz-Riley (IIR), as in TRACK and MIX"); } });
+        steps.push_back ({ "the relays bring the parameter values to the page", [this] { eval (sliderTextScript ("Crossover 1")); },
+                           [this]
+                           {
+                               if (! evalPending && lastEval != juce::var ("120 Hz"))
+                                   eval (sliderTextScript ("Crossover 1"));   // not there yet: ask again
+                               return answered ("120 Hz");
+                           } });
+        steps.push_back ({ "a drag on Crossover 1 moves the parameter, on a log scale",
+                           [this] { eval (dragScript ("Crossover 1", { "250", "500" })); },
+                           [this] { return std::abs (param ("xover.f1") - 141.42f) < 0.5f; } });
+        steps.push_back ({ "the drag was one host gesture", [] {}, [this] { return gestures.begun == 1 && gestures.ended == 1; }, 2.0 });
+        steps.push_back ({ "a choice from the page reaches its parameter (4x)", [this] { eval (clickScript ("4x")); },
+                           [this] { return param ("sat.os") == 2.0f; } });
+        steps.push_back ({ "the high-pass switch reaches its parameter", [this] { eval (clickScript ("High-pass")); },
+                           [this] { return param ("mb.scHpOn") > 0.5f; } });
+        steps.push_back ({ "a parameter moved by the host shows on the page", [this] { setParam ("xover.f2", 2000.0f); },
+                           [this]
+                           {
+                               if (! evalPending && lastEval != juce::var ("2.00 kHz"))
+                                   eval (sliderTextScript ("Crossover 2"));
+                               return answered ("2.00 kHz");
+                           } });
+        steps.push_back ({ "hold for screenshots (advanced)", [] {}, [this] { return now() - stepStart >= holdSec(); }, holdSec() + 5.0 });
         steps.push_back ({ "the page asked for the three bundle files and nothing else", [] {},
                            [this]
                            {
@@ -160,6 +254,23 @@ private:
                            [this] { editor->setDrawerOpen (true); },
                            [this] { return editor->panelShown() && pageShows ("Capturing reference"); } });
         steps.push_back ({ "hold for screenshots (drawer)", [] {}, [this] { return now() - stepStart >= holdSec(); }, holdSec() + 5.0 });
+        // React renders a click after the script that made it returns: ask again until it has.
+        steps.push_back ({ "back on the Assistant tab", [this] { eval (clickTabScript ("Assistant")); },
+                           [this]
+                           {
+                               if (! evalPending && lastEval != juce::var ("true"))
+                                   eval (selectedTabScript ("Assistant"));
+                               return answered ("true");
+                           } });
+        steps.push_back ({ "the drawer closed", [this] { editor->setDrawerOpen (false); }, [this] { return ! editor->panelShown(); } });
+        steps.push_back ({ "the gear opens the drawer on the advanced view", [this] { editor->advancedButton().triggerClick(); },
+                           [this]
+                           {
+                               if (! evalPending && lastEval != juce::var ("true"))
+                                   eval (selectedTabScript ("Advanced"));
+                               return editor->panelShown() && answered ("true");
+                           } });
+        steps.push_back ({ "and shows it", [] {}, [this] { return pageShows ("Crossover"); } });
     }
 
     static double holdSec()

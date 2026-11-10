@@ -444,28 +444,6 @@ TEST_CASE ("editor: the drawer closes when the window narrows and the column ret
     CHECK (e.panelShown());
 }
 
-TEST_CASE ("editor: the header's drawer button overlaps nothing at any drawer width", "[ui][editor][panel]")
-{
-    Fixture f;
-    auto& e = *f.editor;
-    auto& button = e.drawerButton();
-    auto* header = button.getParentComponent();
-    REQUIRE (header != nullptr);
-    for (int w = 900; w < ui::kAssistCollapseW; w += 50)
-    {
-        INFO ("width " << w);
-        e.setSize (w, 700);
-        REQUIRE (button.isVisible());
-        CHECK (header->getLocalBounds().contains (button.getBounds()));
-        for (auto* other : header->getChildren())
-            if (other != &button && other->isVisible())
-            {
-                INFO ("sibling: " << other->getTitle() << " " << other->getName());
-                CHECK_FALSE (other->getBounds().intersects (button.getBounds()));
-            }
-    }
-}
-
 namespace {
 
 /** A WebView panel whose page never says it is ready: what a broken runtime looks like. */
@@ -477,7 +455,90 @@ struct NeverLoads final : ui::AssistantPanel
     int ticks = 0;
 };
 
+/** A WebView panel that loads: what the gear talks to. */
+struct LoadedWeb final : ui::AssistantPanel
+{
+    void showAdvanced() override { ++advancedAsked; }
+    ui::web::PanelKind kind() const override { return ui::web::PanelKind::Web; }
+    int advancedAsked = 0;
+};
+
 } // namespace
+
+TEST_CASE ("editor: the header's buttons overlap nothing at any width", "[ui][editor][panel]")
+{
+    Fixture f;
+    auto& e = *f.editor;
+    e.replacePanel (std::make_unique<LoadedWeb>());   // the gear shows with the WebView only
+    auto* header = e.drawerButton().getParentComponent();
+    REQUIRE (header != nullptr);
+    for (int w : { 900, 950, 1000, 1050, 1099, 1100, 1280, 1400, 2560 })
+    {
+        INFO ("width " << w);
+        e.setSize (w, 700);
+        CHECK (e.advancedButton().isVisible());
+        CHECK (e.drawerButton().isVisible() == (w < ui::kAssistCollapseW));
+        std::vector<juce::Component*> shown;
+        for (auto* c : header->getChildren())
+            if (c->isVisible())
+                shown.push_back (c);
+        for (std::size_t i = 0; i < shown.size(); ++i)
+        {
+            INFO ("control: " << shown[i]->getTitle());
+            CHECK (header->getLocalBounds().contains (shown[i]->getBounds()));
+            for (std::size_t j = i + 1; j < shown.size(); ++j)
+            {
+                INFO ("and: " << shown[j]->getTitle());
+                CHECK_FALSE (shown[i]->getBounds().intersects (shown[j]->getBounds()));
+            }
+        }
+    }
+}
+
+TEST_CASE ("editor: the gear shows only while the column holds the WebView", "[ui][editor][panel]")
+{
+    Fixture f;
+    auto& e = *f.editor;
+    for (int w : { 1000, 1400 })
+    {
+        e.setSize (w, 800);
+        CHECK (e.panelKind() == ui::web::PanelKind::NotBuilt);
+        CHECK_FALSE (e.advancedButton().isVisible());   // the notice has no advanced view
+    }
+    e.replacePanel (std::make_unique<LoadedWeb>());
+    CHECK (e.advancedButton().isVisible());
+    CHECK (e.advancedButton().getTitle() == "Advanced");
+    e.replacePanel (std::make_unique<ui::PanelNotice> (ui::web::PanelKind::DidNotLoad));
+    CHECK_FALSE (e.advancedButton().isVisible());
+}
+
+TEST_CASE ("editor: the gear opens the advanced view, and the drawer when the window is narrow", "[ui][editor][panel]")
+{
+    Fixture f;
+    auto& e = *f.editor;
+    auto web = std::make_unique<LoadedWeb>();
+    auto* panel = web.get();
+    e.replacePanel (std::move (web));
+
+    e.setSize (1400, 800);
+    REQUIRE (e.advancedButton().onClick != nullptr);
+    e.advancedButton().onClick();   // as a click does
+    CHECK (panel->advancedAsked == 1);
+    CHECK (e.panelShown());
+    CHECK_FALSE (e.drawerOpen());
+
+    e.setSize (1000, 700);
+    REQUIRE_FALSE (e.panelShown());
+    e.advancedButton().onClick();
+    CHECK (e.drawerOpen());
+    CHECK (e.panelShown());
+    CHECK (e.drawerButton().getToggleState());
+    CHECK (panel->advancedAsked == 2);
+
+    e.advancedButton().onClick();   // already open: stays open
+    CHECK (e.drawerOpen());
+    CHECK (panel->advancedAsked == 3);
+}
 
 TEST_CASE ("editor: a panel that does not load is replaced by the notice", "[ui][editor][panel]")
 {

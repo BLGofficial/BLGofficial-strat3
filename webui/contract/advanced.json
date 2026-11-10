@@ -1,0 +1,185 @@
+{
+  "relays": [
+    {
+      "id": "xover.f1",
+      "kind": "slider",
+      "name": "Crossover 1",
+      "min": 40.0,
+      "max": 500.0,
+      "default": 120.0,
+      "unit": "Hz",
+      "taper": "log"
+    },
+    {
+      "id": "xover.f2",
+      "kind": "slider",
+      "name": "Crossover 2",
+      "min": 200.0,
+      "max": 5000.0,
+      "default": 1000.0,
+      "unit": "Hz",
+      "taper": "log"
+    },
+    {
+      "id": "xover.f3",
+      "kind": "slider",
+      "name": "Crossover 3",
+      "min": 1000.0,
+      "max": 16000.0,
+      "default": 5000.0,
+      "unit": "Hz",
+      "taper": "log"
+    },
+    {
+      "id": "sat.os",
+      "kind": "comboBox",
+      "name": "Saturate Oversampling",
+      "min": 0.0,
+      "max": 2.0,
+      "default": 1.0,
+      "unit": "",
+      "choices": [
+        "1x",
+        "2x",
+        "4x"
+      ]
+    },
+    {
+      "id": "ceiling.dither",
+      "kind": "comboBox",
+      "name": "Dither",
+      "min": 0.0,
+      "max": 2.0,
+      "default": 0.0,
+      "unit": "",
+      "choices": [
+        "Off",
+        "TPDF",
+        "TPDF Shaped"
+      ]
+    },
+    {
+      "id": "ceiling.bits",
+      "kind": "comboBox",
+      "name": "Dither Bits",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 1.0,
+      "unit": "",
+      "choices": [
+        "16",
+        "24"
+      ]
+    },
+    {
+      "id": "mb.scSource",
+      "kind": "comboBox",
+      "name": "MB Sidechain",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "unit": "",
+      "choices": [
+        "Internal",
+        "External"
+      ]
+    },
+    {
+      "id": "mb.scHpOn",
+      "kind": "toggle",
+      "name": "MB Sidechain HP On",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.0,
+      "unit": ""
+    },
+    {
+      "id": "mb.scHpFreq",
+      "kind": "slider",
+      "name": "MB Sidechain HP Freq",
+      "min": 20.0,
+      "max": 500.0,
+      "default": 80.0,
+      "unit": "Hz",
+      "taper": "log"
+    }
+  ],
+  "info": {
+    "default": {
+      "topology": "iir",
+      "sampleRate": 48000.0,
+      "crossovers": [
+        120.0,
+        1000.0,
+        4999.99951171875
+      ],
+      "crossoversSet": [
+        120.0,
+        1000.0,
+        4999.99951171875
+      ],
+      "oversampling": {
+        "requested": 2,
+        "active": 2
+      },
+      "sidechain": {
+        "channels": 0
+      }
+    },
+    "master-96k": {
+      "topology": "fir",
+      "sampleRate": 96000.0,
+      "crossovers": [
+        299.999969482421875,
+        450.0,
+        4999.99951171875
+      ],
+      "crossoversSet": [
+        450.0,
+        299.999969482421875,
+        4999.99951171875
+      ],
+      "oversampling": {
+        "requested": 4,
+        "active": 2
+      },
+      "sidechain": {
+        "channels": 0
+      }
+    },
+    "sidechain-connected": {
+      "topology": "iir",
+      "sampleRate": 44100.0,
+      "crossovers": [
+        120.0,
+        1000.0,
+        4999.99951171875
+      ],
+      "crossoversSet": [
+        120.0,
+        1000.0,
+        4999.99951171875
+      ],
+      "oversampling": {
+        "requested": 2,
+        "active": 2
+      },
+      "sidechain": {
+        "channels": 2
+      }
+    },
+    "not-prepared": {
+      "topology": null,
+      "sampleRate": 0.0,
+      "crossovers": null,
+      "crossoversSet": null,
+      "oversampling": {
+        "requested": 2,
+        "active": null
+      },
+      "sidechain": {
+        "channels": 0
+      }
+    }
+  }
+}

@@ -10,6 +10,15 @@
 
 namespace strat3::ui {
 
+/** A square button with a gear drawn in the theme (Phase 4 wireframe: [⚙]). No glyph: the
+ *  label font may not have one. */
+class GearButton final : public juce::Button
+{
+public:
+    GearButton() : juce::Button ("Advanced") {}
+    void paintButton (juce::Graphics&, bool over, bool down) override;
+};
+
 class Header final : public juce::Component
 {
 public:
@@ -22,6 +31,10 @@ public:
      *  column (module 21c). */
     juce::TextButton& drawerButton() noexcept { return assistant; }
     void setDrawerMode (bool);
+    /** The gear (module 21d): opens the advanced view. Shown only while the column holds
+     *  the WebView, which is the only panel that has one. */
+    juce::Button& advancedButton() noexcept { return gear; }
+    void setAdvancedAvailable (bool);
 
 private:
     juce::RangedAudioParameter& modeParam;
@@ -30,6 +43,7 @@ private:
     juce::ComboBox target;
     juce::ToggleButton gainMatch { "GAIN-MATCH" }, delta;
     juce::TextButton assistant { "ASSISTANT" };
+    GearButton gear;
     std::unique_ptr<juce::ComboBoxParameterAttachment> targetAttach;
     std::unique_ptr<juce::ButtonParameterAttachment> gainMatchAttach, deltaAttach;
 };

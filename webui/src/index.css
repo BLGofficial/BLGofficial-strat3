@@ -65,6 +65,15 @@
     @apply border-signal text-signal;
   }
 
+  /* A chosen radio or a switch that is on: filled, as a toggled button in the native editor
+     (Theme.cpp). */
+  .btn[aria-checked='true'],
+  .btn[aria-checked='true']:hover:not(:disabled) {
+    /* Not `text-base`: that is also Tailwind's 16 px font size. */
+    @apply border-signal bg-signal;
+    color: theme('colors.base');
+  }
+
   .scroll {
     scrollbar-width: thin;
     scrollbar-color: theme('colors.rule') theme('colors.base');
@@ -78,7 +87,7 @@
     background: theme('colors.rule');
   }
 
-  /* Depth slider. The filled part is a hard-edged two-colour background, driven by --fill
+  /* Depth slider, and the advanced view's parameter sliders. The filled part is a hard-edged two-colour background, driven by --fill
      (set inline from the value): WebKit has no pseudo-element for the filled side. */
   .depth {
     -webkit-appearance: none;
