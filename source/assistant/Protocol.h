@@ -97,9 +97,9 @@ inline const char* name (CaptureResult r) noexcept
 inline std::optional<Command> parseCommand (const juce::var& v)
 {
     using namespace protocoldetail;
-    if (v.getDynamicObject() == nullptr)
-        return std::nullopt;
-    const auto type = v["type"].toString();   // a non-string type converts to text that matches no command
+    // No explicit "is it an object, is type a string" check: anything else has no type, or
+    // one whose text matches no command below, and falls through to the refusal at the end.
+    const auto type = v["type"].toString();
     Command c;
 
     if (type == "cancel")      { c.type = CommandType::Cancel;      return c; }
