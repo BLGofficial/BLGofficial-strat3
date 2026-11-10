@@ -95,6 +95,11 @@ ctest --test-dir build                 # C++: DSP, engine, processor, assistant,
 cd webui && npm test                   # the panels (Vitest)
 ```
 
+With `STRAT3_BUILD_PLUGIN`, `STRAT3_BUILD_TESTS` and `STRAT3_WITH_WEBUI` all on, ctest also
+runs `webview_check`: the real editor in a window with the system WebView, clicking through
+the panels. When `xvfb-run` is installed (package `xvfb`) ctest runs it under that, so no
+display is needed; it is skipped when no WebView can be started.
+
 The C++ side and the panels share one contract in `webui/contract/`: protocol states
 recorded from the real C++ code, and every command the panels send. Both test suites read
 it, so neither side can change the protocol alone. How to re-record it after a protocol
@@ -113,8 +118,9 @@ source/
   params/       parameter specs and layout, saved-state migration
   processor/    the AudioProcessor: parameters to engine, state, analysis thread
   assistant/    capture session, proposal rules, the JSON protocol for the panels
-  ui/           native editor (ui/native/) and its headless layout logic (ui/model/)
-tests/          Catch2 tests, mirroring source/
+  ui/           native editor (ui/native/), its headless layout logic (ui/model/), and the
+                WebView host for the panels (ui/web/)
+tests/          Catch2 tests, mirroring source/; tests/webview/ runs the panels in a real WebView
 webui/          React panels for the WebView, and the shared contract
 cmake/          CPM (dependency fetching)
 ```
@@ -122,17 +128,19 @@ cmake/          CPM (dependency fetching)
 ## Status
 
 Done and tested on Linux (x86_64, gcc 13): the DSP layers, the engine, the processor,
-metering, the native editor, the assistant session and protocol, and the WebView panels in a
-browser.
+metering, the native editor, the assistant session and protocol, and the assistant and target
+panels in the plugin window (WebKitGTK). Below 1100 px wide the panels open as a drawer from
+the header's ASSISTANT button. Without a working WebView the column says why and the rest of
+the plugin works as usual.
 
 Not done yet:
-- Hosting the WebView panels inside the plugin window (in progress).
 - The advanced panel.
 - STEMS (stem-aware processing).
 - Importing references from audio files.
 - CPU readout per layer.
 
-Not verified yet: any DAW, macOS, Windows, pluginval, clap-validator.
+Not verified yet: any DAW, macOS (WKWebView), Windows (WebView2), the WebView inside a
+plugin host on Linux (it was run in a standalone window), pluginval, clap-validator.
 
 ## Licence
 

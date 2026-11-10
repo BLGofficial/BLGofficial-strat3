@@ -18,12 +18,18 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
+    /** The assistant drawer's toggle: shown only while the window is too narrow for the
+     *  column (module 21c). */
+    juce::TextButton& drawerButton() noexcept { return assistant; }
+    void setDrawerMode (bool);
+
 private:
     juce::RangedAudioParameter& modeParam;
     juce::ParameterAttachment modeAttach;
     std::array<juce::TextButton, 3> modes;
     juce::ComboBox target;
     juce::ToggleButton gainMatch { "GAIN-MATCH" }, delta;
+    juce::TextButton assistant { "ASSISTANT" };
     std::unique_ptr<juce::ComboBoxParameterAttachment> targetAttach;
     std::unique_ptr<juce::ButtonParameterAttachment> gainMatchAttach, deltaAttach;
 };

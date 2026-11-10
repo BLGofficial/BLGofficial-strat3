@@ -41,6 +41,15 @@ Header::Header (juce::AudioProcessorValueTreeState& s)
     delta.setTitle ("Global delta");
     deltaAttach = std::make_unique<juce::ButtonParameterAttachment> (*s.getParameter ("global.delta"), delta);
     addAndMakeVisible (delta);
+
+    assistant.setTitle ("Assistant");
+    assistant.setClickingTogglesState (true);
+    addChildComponent (assistant);   // the editor shows it below the column breakpoint
+}
+
+void Header::setDrawerMode (bool on)
+{
+    assistant.setVisible (on);
 }
 
 Header::~Header() = default;
@@ -70,6 +79,8 @@ void Header::resized()
     target.setBounds (488, y, 150, h);
     delta.setBounds (getWidth() - 16 - 32, y, 32, h);
     gainMatch.setBounds (delta.getX() - 8 - 110, y, 110, h);
+    // Left of GAIN-MATCH; at the minimum width (900) it still clears the target box (ends 638).
+    assistant.setBounds (gainMatch.getX() - 4 - 88, y, 88, h);
 }
 
 // ------------------------------------------------------------------------------ delivery bar

@@ -152,6 +152,8 @@ if(STRAT3_BUILD_TESTS)
     enable_testing()
 
     file(GLOB_RECURSE STRAT3_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
+    # tests/webview/ is its own app (a real WebView needs a window and a JUCEApplication).
+    list(FILTER STRAT3_TEST_SOURCES EXCLUDE REGEX "/tests/webview/")
     add_executable(strat3_tests ${STRAT3_TEST_SOURCES})
     set_source_files_properties(${STRAT3_TEST_SOURCES} PROPERTIES COMPILE_OPTIONS "${STRAT3_WARNING_FLAGS}")
     target_include_directories(strat3_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
@@ -173,4 +175,36 @@ if(STRAT3_BUILD_TESTS)
     list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
     include(Catch)
     catch_discover_tests(strat3_tests)
+endif()
+
+# ---------------------------------------------------------------- the panels in a real WebView
+# The plugin's editor with the embedded bundle, in a window: page load, commands and state
+# both ways, the drawer. It needs a display; ctest runs it through xvfb-run when there is one,
+# and counts exit code 77 (no WebView could be created) as skipped.
+if(STRAT3_BUILD_TESTS AND STRAT3_BUILD_PLUGIN AND STRAT3_WITH_WEBUI)
+    juce_add_gui_app(strat3_webview_check
+        PRODUCT_NAME "strat3_webview_check"
+        NEEDS_WEB_BROWSER TRUE
+        NEEDS_WEBVIEW2 TRUE)
+    target_sources(strat3_webview_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/webview/WebViewCheck.cpp)
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/tests/webview/WebViewCheck.cpp PROPERTIES COMPILE_OPTIONS "${STRAT3_WARNING_FLAGS}")
+    target_compile_definitions(strat3_webview_check PRIVATE
+        JUCE_USE_CURL=0
+        JUCE_WEB_BROWSER=1
+        JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=1
+        STRAT3_WITH_WEBUI=1)
+    target_link_libraries(strat3_webview_check PRIVATE
+        strat3_dsp
+        strat3_params
+        strat3_processor
+        strat3_webui
+        juce::juce_gui_extra
+        juce::juce_recommended_config_flags)
+    find_program(STRAT3_XVFB_RUN xvfb-run)
+    if(STRAT3_XVFB_RUN)
+        add_test(NAME webview_check COMMAND ${STRAT3_XVFB_RUN} -a -s "-screen 0 1600x1000x24" $<TARGET_FILE:strat3_webview_check>)
+    else()
+        add_test(NAME webview_check COMMAND $<TARGET_FILE:strat3_webview_check>)
+    endif()
+    set_tests_properties(webview_check PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 endif()

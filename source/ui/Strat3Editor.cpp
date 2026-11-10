@@ -2,6 +2,7 @@
 
 #include "analysis/Loudness1770.h"
 #include "processor/Strat3Processor.h"
+#include "ui/web/WebPanelHost.h"
 
 namespace strat3::ui {
 
@@ -38,6 +39,9 @@ Strat3Editor::Strat3Editor (processor::Strat3Processor& p)
     addAndMakeVisible (delivery);
     delivery.onClearClips = [this] { clickClipLeds(); };
     delivery.onClearNonFinite = [this] { proc.clearNonFiniteFlag(); };
+    // After the stack: the drawer lies over it, so it must be in front.
+    replacePanel (makeAssistantPanel (proc));
+    header.drawerButton().onClick = [this] { setDrawerOpen (header.drawerButton().getToggleState()); };
 
     rebuildRows (proc.preparedOrder());
 
@@ -50,6 +54,7 @@ Strat3Editor::Strat3Editor (processor::Strat3Processor& p)
 Strat3Editor::~Strat3Editor()
 {
     stopTimer();
+    panel.reset();   // the WebView first: its callbacks reach into the processor
     rows.clear();
     setLookAndFeel (nullptr);
 }
@@ -58,11 +63,64 @@ void Strat3Editor::paint (juce::Graphics& g) { g.fillAll (theme::kBase); }
 
 void Strat3Editor::resized()
 {
-    const auto l = computeLayout (getWidth(), getHeight(), false);
+    const auto l = computeLayout (getWidth(), getHeight());
     header.setBounds (l.header.x, l.header.y, l.header.w, l.header.h);
     stackView.setBounds (l.stack.x, l.stack.y, l.stack.w, l.stack.h);
     delivery.setBounds (l.delivery.x, l.delivery.y, l.delivery.w, l.delivery.h);
+    layoutPanel (l);
     layoutRows();
+}
+
+void Strat3Editor::layoutPanel (const Layout& l)
+{
+    if (l.assistDrawer && ! inDrawerMode)
+        isDrawerOpen = false;   // narrowing must not drop a panel over the stack unasked
+    inDrawerMode = l.assistDrawer;
+    header.setDrawerMode (inDrawerMode);
+    header.drawerButton().setToggleState (inDrawerMode && isDrawerOpen, juce::dontSendNotification);
+
+    const auto r = inDrawerMode ? drawerBounds (l) : l.assist;
+    panel->setBounds (r.x, r.y, r.w, r.h);
+    panel->setVisible (! inDrawerMode || isDrawerOpen);
+}
+
+void Strat3Editor::setDrawerOpen (bool open)
+{
+    if (! inDrawerMode)
+        return;
+    isDrawerOpen = open;
+    layoutPanel (computeLayout (getWidth(), getHeight()));
+}
+
+void Strat3Editor::replacePanel (std::unique_ptr<AssistantPanel> next)
+{
+    if (panel != nullptr)
+        removeChildComponent (panel.get());
+    panel = std::move (next);
+    addChildComponent (*panel);
+    if (getWidth() > 0)
+        layoutPanel (computeLayout (getWidth(), getHeight()));
+}
+
+juce::String Strat3Editor::panelTitle() const
+{
+    const auto* n = dynamic_cast<const PanelNotice*> (panel.get());
+    return n != nullptr ? n->notice().title : juce::String();
+}
+
+juce::String Strat3Editor::panelText() const
+{
+    const auto* n = dynamic_cast<const PanelNotice*> (panel.get());
+    return n != nullptr ? n->notice().body : juce::String();
+}
+
+web::WebPanelHost* Strat3Editor::webPanel() noexcept
+{
+   #if JUCE_WEB_BROWSER && STRAT3_WITH_WEBUI
+    return dynamic_cast<web::WebPanelHost*> (panel.get());
+   #else
+    return nullptr;
+   #endif
 }
 
 void Strat3Editor::rebuildRows (const engine::LayerOrder& order)
@@ -292,6 +350,10 @@ void Strat3Editor::tick (float dt)
     }
 
     updateMeters (dt, frameCount++ % 2 == 0);   // bars at 30 Hz, numbers at 15 Hz (Phase 4)
+
+    panel->tick (juce::Time::getMillisecondCounterHiRes() / 1000.0);
+    if (panel->failed())
+        replacePanel (std::make_unique<PanelNotice> (web::PanelKind::DidNotLoad));
 }
 
 } // namespace strat3::ui
