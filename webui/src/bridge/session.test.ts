@@ -34,6 +34,13 @@ describe('session store without the plugin', () => {
     }).not.toThrow()
     expect(store.getSnapshot()).toEqual({ status: 'unavailable' })
   })
+
+  it('still lets a subscriber come and go', () => {
+    const heard = vi.fn()
+    const unsubscribe = createSessionStore(null).subscribe(heard)
+    expect(() => unsubscribe()).not.toThrow()
+    expect(heard).not.toHaveBeenCalled()
+  })
 })
 
 describe('session store inside the plugin', () => {

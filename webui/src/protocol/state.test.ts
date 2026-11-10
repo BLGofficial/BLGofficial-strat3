@@ -86,6 +86,7 @@ describe('parseState: refusals', () => {
     ['bands without a captured target', (s) => (s.target.captured = false)],
     ['moves that are not a list', (s) => (s.moves = {})],
     ['a move that is not an object', (s) => (s.moves[0] = 'eq')],
+    ['a move that is null', (s) => (s.moves[0] = null)],
     ['a move id of 0', (s) => (s.moves[0].id = 0)],
     ['a fractional move id', (s) => (s.moves[0].id = 1.5)],
     ['two moves with one id', (s) => (s.moves[1].id = s.moves[0].id)],
@@ -100,6 +101,7 @@ describe('parseState: refusals', () => {
     ['a target value as text', (s) => (s.moves[0].metricTarget = '0')],
     ['changes that are not a list', (s) => (s.moves[0].changes = null)],
     ['a change that is not an object', (s) => (s.moves[0].changes[0] = 7)],
+    ['a change that is null', (s) => (s.moves[0].changes[0] = null)],
     ['a parameter id that is not text', (s) => (s.moves[0].changes[0].paramId = 7)],
     ['a from value as text', (s) => (s.moves[0].changes[0].from = '0')],
     ['a to value that is not a number', (s) => (s.moves[0].changes[0].to = null)],
@@ -114,6 +116,26 @@ describe('parseState: refusals', () => {
 
   it('reads the undamaged state those refusals start from', () => {
     expect(parseState(raw('moves-decided'))).not.toBeNull()
+  })
+
+  it('refuses a zero reference limit even when no reference is in', () => {
+    const payload = raw('idle')
+    payload.target.maxReferences = 0
+    expect(parseState(payload)).toBeNull()
+  })
+
+  it('reads a limit of a single reference', () => {
+    const payload = raw('reference-added')
+    payload.target.maxReferences = 1
+    expect(parseState(payload)?.target).toMatchObject({ references: 1, maxReferences: 1 })
+  })
+
+  it('refuses a number JSON cannot carry, should one ever arrive', () => {
+    const payload = raw('moves-decided')
+    payload.moves[0].metricBefore = Number.NaN
+    expect(parseState(payload)).toBeNull()
+    payload.moves[0].metricBefore = Number.POSITIVE_INFINITY
+    expect(parseState(payload)).toBeNull()
   })
 })
 

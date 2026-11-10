@@ -5,7 +5,9 @@
 //   - the target curve is drawn from the plugin's bands, one point each, and only when a
 //     target exists
 //   - Clear target asks first (the references took minutes of playback to capture): nothing
-//     is sent until the second click, and Keep backs out
+//     is sent until the second click, and Keep backs out. The question belongs to the
+//     count it asked about: when the count changes underneath, the question goes and does
+//     not come back by itself
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -106,5 +108,16 @@ describe('Targets: clearing', () => {
     rerender(<Targets state={state('idle')} send={vi.fn()} />)
     expect(screen.queryByRole('button', { name: 'Clear' })).toBeNull()
     expect(button('Clear target').disabled).toBe(true)
+  })
+
+  it('drops the question when a reference is added meanwhile, and does not bring it back', () => {
+    const { rerender, send } = show(state('reference-added')) // 1 reference
+    fireEvent.click(button('Clear target'))
+    rerender(<Targets state={state('moves-pending')} send={send} />) // 2 references
+    expect(screen.queryByText(/^Clear \d+ references?\?$/)).toBeNull()
+    expect(button('Clear target').disabled).toBe(false)
+    rerender(<Targets state={state('reference-added')} send={send} />) // the count it asked about, again
+    expect(screen.queryByText(/^Clear \d+ references?\?$/)).toBeNull()
+    expect(send).not.toHaveBeenCalled()
   })
 })

@@ -69,7 +69,7 @@ const STATUSES: readonly MoveStatus[] = ['pending', 'accepted', 'rejected']
 type Fields = Readonly<Record<string, unknown>>
 
 const isObject = (v: unknown): v is Fields => typeof v === 'object' && v !== null && !Array.isArray(v)
-const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+const isNumber = (v: unknown): v is number => Number.isFinite(v) // false for anything that is not a number
 const isCount = (v: unknown): v is number => isNumber(v) && Number.isInteger(v) && v >= 0
 const isUnit = (v: unknown): v is number => isNumber(v) && v >= 0 && v <= 1
 const isBoolean = (v: unknown): v is boolean => typeof v === 'boolean'

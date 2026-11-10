@@ -33,7 +33,8 @@ in both.
   builders against it; the C++ test feeds it to the real `parseCommand`.
 
 After a protocol change: run the C++ tests, copy `<build>/panel-contract/states/*.json` over
-`contract/states/`, then run `npm test` and fix what the page no longer reads.
+`contract/states/`, then run `npm test` and fix what the page no longer reads. A new state
+also needs its name in `src/test/fixtures.ts`; the page's tests fail until it is listed.
 
 ## The bridge
 

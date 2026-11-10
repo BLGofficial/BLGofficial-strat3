@@ -8,6 +8,7 @@ export const FIXTURE_NAMES = [
   'analyse-running',
   'cancelled',
   'idle',
+  'moves-applied',
   'moves-decided',
   'moves-history',
   'moves-no-target',

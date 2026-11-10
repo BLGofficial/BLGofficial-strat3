@@ -1,7 +1,7 @@
 // The target panel: the user's own target, built from reference tracks played through the
 // plugin. There is no built-in genre curve and (for now) no file import, so there are no
 // controls for either.
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 
 import type { PanelProps } from '../components/CaptureStrip'
 import { TargetCurve } from '../components/TargetCurve'
@@ -16,11 +16,11 @@ export function Targets({ state, send }: PanelProps) {
   // Clearing throws away minutes of captured references, so it takes a second click. The
   // question is tied to the count it asked about: if that changes underneath (a capture
   // finishes, another clear lands), the question is no longer the one the user saw.
+  // Dropped while rendering, not in an effect: React then renders again before anything is
+  // painted, so the stale question is never on screen, not even for a frame.
   const [askedFor, setAskedFor] = useState<number | null>(null)
-  useEffect(() => {
-    if (askedFor !== null && askedFor !== target.references) setAskedFor(null)
-  }, [askedFor, target.references])
-  const asking = askedFor !== null && askedFor === target.references && target.references > 0
+  if (askedFor !== null && askedFor !== target.references) setAskedFor(null)
+  const asking = askedFor !== null
 
   return (
     <div>

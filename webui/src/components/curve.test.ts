@@ -61,6 +61,12 @@ describe('rangeDb', () => {
     expect(rangeDb([-30, 2, -30], [20, 1000, 20000])).toBe(12)
   })
 
+  it('counts the bands at 40 Hz and 16 kHz themselves, and nothing beyond them', () => {
+    expect(rangeDb([13, 0], [40, 1000])).toBe(18)
+    expect(rangeDb([0, 13], [1000, 16000])).toBe(18)
+    expect(rangeDb([13, 0, 13], [39.9, 1000, 16000.1])).toBe(12)
+  })
+
   it('is 12 dB for no curve at all', () => {
     expect(rangeDb([], [])).toBe(12)
   })

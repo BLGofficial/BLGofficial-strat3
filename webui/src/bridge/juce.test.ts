@@ -14,6 +14,8 @@ describe('connect', () => {
   it('finds no bridge outside the plugin', () => {
     expect(connect({})).toBeNull()
     expect(connect({ __JUCE__: {} })).toBeNull()
+    expect(connect({ __JUCE__: { backend: null } })).toBeNull()
+    expect(connect({ __JUCE__: { backend: 'backend' } })).toBeNull()
   })
 
   it.each(['addEventListener', 'removeEventListener', 'emitEvent'] as const)('finds no bridge when the backend has no %s', (missing) => {

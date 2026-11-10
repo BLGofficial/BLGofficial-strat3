@@ -304,10 +304,55 @@ describe('Assistant: depth', () => {
     expect(slider(2).value).toBe('35')
   })
 
+  it('does not fall back under a hand that came back in time', () => {
+    vi.useFakeTimers()
+    show(state('moves-decided'))
+    drag(slider(2), 35)
+    letGo(slider(2))
+    act(() => void vi.advanceTimersByTime(300))
+    drag(slider(2), 40)
+    act(() => void vi.advanceTimersByTime(5000))
+    expect(slider(2).value).toBe('40')
+  })
+
+  it('does not fall back under that hand after a second letting go either', () => {
+    vi.useFakeTimers()
+    show(state('moves-decided'))
+    drag(slider(2), 35)
+    letGo(slider(2))
+    act(() => void vi.advanceTimersByTime(100))
+    fireEvent.blur(slider(2)) // focus moves on: the slider is let go a second time
+    act(() => void vi.advanceTimersByTime(100))
+    drag(slider(2), 40)
+    act(() => void vi.advanceTimersByTime(5000))
+    expect(slider(2).value).toBe('40')
+  })
+
+  it('leaves nothing running or listening when the panel goes away', () => {
+    vi.useFakeTimers()
+    const { unmount } = show(state('moves-decided'))
+    const element = slider(2)
+    drag(element, 35)
+    drag(element, 40)
+    letGo(element)
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
+    fireEvent.change(element) // off the page now: letting it go must not start anything
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('stores the depth of a pending move too', () => {
     const { send } = show(state('moves-pending'))
     drag(slider(3), 50)
     expect(send.mock.calls).toEqual([[depth(3, 0.5)]])
+  })
+})
+
+describe('Assistant: a move with one change', () => {
+  it('counts it in the singular', () => {
+    show(state('moves-applied')) // move 7 only moves the threshold: the limiter is on already
+    expect(within(move(7)).getByText('1 change')).toBeTruthy()
+    expect(within(move(7)).getAllByRole('row').map((r) => r.textContent)).toEqual(['limit.thresh-3.2 → -4.4× depth'])
   })
 })
 
@@ -323,6 +368,15 @@ describe('Assistant: history', () => {
     expect(within(move(1)).getByText('Accepted at 100 %')).toBeTruthy()
     expect(within(move(4)).getByText('Rejected')).toBeTruthy()
     expect(screen.getByText('3 pending')).toBeTruthy()
+  })
+
+  it('gives a depth only for an applied move that has something to scale', () => {
+    show(state('moves-applied')) // four applied and the sibilance dip turned down, then analysed again
+    expect(within(move(5)).getByText('Accepted at 100 %')).toBeTruthy()
+    expect(within(move(4)).getByText('Accepted')).toBeTruthy() // mono bass: three switches, nothing to scale
+    expect(within(move(4)).queryByText(/Accepted at/)).toBeNull()
+    expect(within(move(3)).getByText('Rejected')).toBeTruthy() // has a scaled change, but was never applied
+    expect(within(move(3)).queryByText(/Accepted/)).toBeNull()
   })
 
   it('shows no history before a second analysis', () => {

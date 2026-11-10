@@ -31,5 +31,9 @@ export default defineConfig({
     include: ['src/**/*.test.{ts,tsx}'],
     setupFiles: ['src/test/setup.ts'],
     restoreMocks: true,
+    // The fixtures are a folder listing (import.meta.glob over contract/states/). The
+    // on-disk module cache keeps that listing from the last run, so a newly recorded state
+    // nobody listed would go unnoticed, which is the one thing the listing is checked for.
+    fsModuleCache: false,
   },
 })

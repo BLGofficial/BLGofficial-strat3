@@ -2,7 +2,9 @@
 // colour, square corners. Keep the two in step by hand; there are seven shared values.
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: ['./index.html', './src/**/*.{ts,tsx}'],
+  // Not the tests: a word in a test ("blur", "container") is read as a class name and
+  // would put its rule into the shipped stylesheet.
+  content: ['./index.html', './src/**/*.{ts,tsx}', '!./src/**/*.test.{ts,tsx}', '!./src/test/**'],
   theme: {
     colors: {
       transparent: 'transparent',

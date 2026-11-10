@@ -50,6 +50,7 @@ describe('App: no usable link', () => {
   it('says it is waiting before the first state', () => {
     setUp()
     expect(screen.getByRole('heading', { name: 'Waiting for the engine' })).toBeTruthy()
+    expect(screen.getByText('The plugin has not sent its state yet.')).toBeTruthy()
     expect(screen.queryAllByRole('button')).toEqual([])
   })
 
@@ -109,6 +110,26 @@ describe('App: live', () => {
     expect(tab('Target').getAttribute('aria-selected')).toBe('true')
   })
 
+  it('swallows the arrow keys it acts on and leaves every other key alone', () => {
+    setUp('moves-pending')
+    // fireEvent gives false when the page called preventDefault on the event.
+    expect(fireEvent.keyDown(tab('Assistant'), { key: 'Tab' })).toBe(true)
+    expect(fireEvent.keyDown(tab('Assistant'), { key: 'Enter' })).toBe(true)
+    expect(tab('Assistant').getAttribute('aria-selected')).toBe('true')
+    expect(fireEvent.keyDown(tab('Assistant'), { key: 'ArrowRight' })).toBe(false) // or the panel would scroll
+  })
+
+  it('ties each tab to the panel it shows', () => {
+    setUp('moves-pending')
+    const assistantId = screen.getByRole('tabpanel', { name: 'Assistant' }).id
+    expect(assistantId).not.toBe('')
+    expect(tab('Assistant').getAttribute('aria-controls')).toBe(assistantId)
+    fireEvent.click(tab('Target'))
+    const targetId = screen.getByRole('tabpanel', { name: 'Target' }).id
+    expect(targetId).not.toBe(assistantId)
+    expect(tab('Target').getAttribute('aria-controls')).toBe(targetId)
+  })
+
   it('keeps the capture strip on screen under both tabs', () => {
     setUp('analyse-running')
     expect(screen.getByRole('progressbar', { name: 'Capture progress' })).toBeTruthy()
@@ -144,6 +165,18 @@ describe('App: visibility', () => {
     expect(fake.readyCount()).toBe(before)
     setVisibility('visible')
     expect(fake.readyCount()).toBe(before + 1)
+  })
+
+  it('asks the store it was last given', () => {
+    const first = setUp('moves-pending')
+    const other = createFakeBackend()
+    const otherStore = createSessionStore(connect({ __JUCE__: { backend: other.backend } }))
+    const before = { first: first.fake.readyCount(), other: other.readyCount() }
+    first.rerender(<App store={otherStore} />)
+    setVisibility('visible')
+    expect(other.readyCount()).toBe(before.other + 1)
+    expect(first.fake.readyCount()).toBe(before.first)
+    otherStore.dispose() // it has no state yet and would go on asking every second
   })
 
   it('stops watching when it is taken down', () => {

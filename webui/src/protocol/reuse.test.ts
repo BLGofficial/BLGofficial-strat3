@@ -45,6 +45,16 @@ describe('reuse', () => {
     expect(merged.moves).toHaveLength(next.moves.length)
   })
 
+  it('takes the shorter list when the new one lost its tail', () => {
+    // Clearing the target empties its 61 bands: the old levels must not survive that.
+    const previous = state('moves-pending')
+    const next = state('idle')
+    const merged = reuse(previous, next)
+    expect(merged).toEqual(next)
+    expect(merged.target.levelDb).toHaveLength(0)
+    expect(reuse<unknown>([1, 2, 3], [1, 2])).toEqual([1, 2])
+  })
+
   it('compares plain values by value', () => {
     expect(reuse(1, 1)).toBe(1)
     expect(reuse('a', 'b')).toBe('b')

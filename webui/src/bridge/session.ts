@@ -87,7 +87,6 @@ export function createSessionStore(bridge: Bridge | null): SessionStore {
     dispose() {
       stopRetry()
       stopListening()
-      subscribers.clear()
     },
   }
 }

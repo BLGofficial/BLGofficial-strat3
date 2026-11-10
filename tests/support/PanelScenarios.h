@@ -176,6 +176,20 @@ inline std::vector<Scenario> scenarios()
     auto history = decided;
     capture (history, CaptureKind::Analyse, 60.0, -14.3, pDecided, mixLater);
 
+    // Everything applied as proposed except the sibilance dip, which was turned down; then
+    // analysed again. The five moves stay as locked history, among them the bass move
+    // (switches only, so it has no depth to show) and the rejected dip. Tone and bass now
+    // match the target. The sibilance is still there, so the dip is proposed again. The
+    // limiter's open-loop estimate came out 1.2 LU short, so the other new proposal is a
+    // single threshold change, the limiter being on already.
+    auto applied = pending;
+    auto pApplied = p;
+    setValues (pApplied, reject (applied, idOf (applied, "eq", 2)));
+    setValues (pApplied, applyAll (applied));
+    const auto appliedQuiet = spectrum (-1.5, -30.0, { { kBand8k - 1, kBand8k + 1, -2.0 } });
+    const auto appliedLoud = spectrum (-1.5, -30.0, { { kBand8k - 1, kBand8k + 1, 10.0 } });
+    capture (applied, CaptureKind::Analyse, 30.0, -15.2, pApplied, [=] (int f) { return (f / kFramesPerBlock) % 5 == 0 ? appliedLoud : appliedQuiet; });
+
     auto noTarget = idle;
     capture (noTarget, CaptureKind::Analyse, 30.0, -17.2, p, mix);
 
@@ -209,6 +223,7 @@ inline std::vector<Scenario> scenarios()
         { "moves-pending", stateToVar (pending) },
         { "moves-decided", stateToVar (decided) },
         { "moves-history", stateToVar (history) },
+        { "moves-applied", stateToVar (applied) },
         { "moves-no-target", stateToVar (noTarget) },
         { "no-moves", stateToVar (noMoves) },
         { "silent", stateToVar (silent) },

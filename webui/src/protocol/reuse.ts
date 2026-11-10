@@ -10,10 +10,8 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v ===
  * @returns a value equal to `next`; `previous` itself if nothing differs
  */
 export function reuse<T>(previous: T, next: T): T {
-  if (Object.is(previous, next)) return previous
-
   if (Array.isArray(previous) && Array.isArray(next)) {
-    const merged = next.map((item, i) => (i < previous.length ? reuse<unknown>(previous[i], item) : item))
+    const merged = next.map((item, i) => reuse<unknown>(previous[i], item))
     const same = previous.length === next.length && merged.every((item, i) => item === previous[i])
     return (same ? previous : merged) as T
   }
