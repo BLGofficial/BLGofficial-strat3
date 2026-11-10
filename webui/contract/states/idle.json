@@ -1,0 +1,18 @@
+{
+  "revision": 0,
+  "capture": {
+    "kind": "none",
+    "progress": 0.0,
+    "seconds": 0.0,
+    "paused": false
+  },
+  "result": "none",
+  "target": {
+    "captured": false,
+    "references": 0,
+    "maxReferences": 16,
+    "levelDb": [],
+    "bandHz": []
+  },
+  "moves": []
+}

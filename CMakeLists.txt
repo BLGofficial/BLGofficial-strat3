@@ -166,7 +166,9 @@ if(STRAT3_BUILD_TESTS)
         JUCE_WEB_BROWSER=0
         JUCE_STANDALONE_APPLICATION=1
         STRAT3_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
-        STRAT3_CANDIDATE_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+        STRAT3_CANDIDATE_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+        # Shared with the page's own tests: recorded protocol states and the page's commands.
+        STRAT3_PANEL_CONTRACT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/webui/contract")
 
     list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
     include(Catch)
