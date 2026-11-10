@@ -541,3 +541,67 @@ TEST_CASE ("level spectrum: silence reads the floor, never -inf", "[analysis][im
         CHECK (f.levelDb[0][static_cast<size_t> (b)] == kImpactLevelFloorDb);
     }
 }
+
+// ------------------------------------------------------------------- output energies (assistant feed)
+
+TEST_CASE ("output energies: the last tap's raw mid/side band energies, once per new window", "[analysis][impact][output]")
+{
+    Rig rig (2);
+    const double amp = 0.5;
+    auto phase = std::make_shared<double> (0.0);
+    const auto sine = [=] {
+        const float v = static_cast<float> (amp * std::sin (*phase));
+        *phase += kTwoPi * 1000.0 / kFs;
+        return StereoSample { v, v };
+    };
+    std::array<double, kImpactBands> m {}, s {};
+    CHECK_FALSE (takeOutputEnergies (*rig.an, m, s));   // nothing analysed yet
+    rig.run (sine, { gain (1.0f), gain (0.5f) }, static_cast<int> (kFs * 1.0));
+    REQUIRE (takeOutputEnergies (*rig.an, m, s));
+    // After the 0.5 gain: mid mean square (0.25)^2 / 2, no side. Unsmoothed, so exact after
+    // one window; the 250 ms smoothing of the impact map would still be rising here.
+    const double expect = 0.25 * 0.25 / 2.0;
+    double total = 0.0, side = 0.0;
+    for (int b = 0; b < kImpactBands; ++b)
+    {
+        total += m[static_cast<size_t> (b)];
+        side += s[static_cast<size_t> (b)];
+    }
+    CHECK (std::abs (10.0 * std::log10 (total / expect)) < 0.1);
+    CHECK (side < expect * 1e-9);
+    CHECK (m[34] > 0.5 * expect);
+
+    // Taken: the same window is never handed out twice (a stopped transport must not fill
+    // a capture with copies of its last window).
+    CHECK_FALSE (takeOutputEnergies (*rig.an, m, s));
+    computeFrame (*rig.an);   // no new samples since the last frame
+    CHECK_FALSE (takeOutputEnergies (*rig.an, m, s));
+    rig.run (sine, { gain (1.0f), gain (0.5f) }, static_cast<int> (kFs * 0.1));
+    CHECK (takeOutputEnergies (*rig.an, m, s));
+}
+
+TEST_CASE ("output energies: side energy is reported apart from mid", "[analysis][impact][output]")
+{
+    Rig rig (1);
+    rig.run (noise (0.25f, 11), { gain (1.0f) }, static_cast<int> (kFs * 1.0));
+    std::array<double, kImpactBands> m {}, s {};
+    REQUIRE (takeOutputEnergies (*rig.an, m, s));
+    // Independent L/R noise: mid and side carry the same energy on average.
+    double sm = 0.0, ss = 0.0;
+    for (int b : bandsBetween (1000.0, 16000.0))
+    {
+        sm += m[static_cast<size_t> (b)];
+        ss += s[static_cast<size_t> (b)];
+    }
+    CHECK (std::abs (10.0 * std::log10 (ss / sm)) < 1.0);
+}
+
+TEST_CASE ("output energies: a NaN window is never handed out", "[analysis][impact][output][stability]")
+{
+    Rig rig (1);
+    rig.run (noise (0.25f, 3), { gain (1.0f) }, static_cast<int> (kFs * 0.5));
+    std::array<double, kImpactBands> m {}, s {};
+    REQUIRE (takeOutputEnergies (*rig.an, m, s));
+    rig.run ([] { return StereoSample { std::numeric_limits<float>::quiet_NaN(), 0.0f }; }, { gain (1.0f) }, 4096);
+    CHECK_FALSE (takeOutputEnergies (*rig.an, m, s));
+}

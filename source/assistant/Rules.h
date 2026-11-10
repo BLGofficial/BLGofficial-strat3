@@ -291,6 +291,7 @@ inline void tonal (const Snapshot& s, const TargetCurve& target, const ParamValu
         Move m;
         m.id = nextId++;
         m.layer = "eq";
+        change (m, p, "eq.on", 0.0f, 1.0f, false);   // like LOW and LIMIT: a bypassed layer would make the move inaudible
         change (m, p, pre + "on", 0.0f, 1.0f, false);
         change (m, p, pre + "type", 0.0f, 0.0f, false);   // Bell
         change (m, p, pre + "ms", 0.0f, 0.0f, false);     // Stereo

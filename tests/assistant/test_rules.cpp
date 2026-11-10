@@ -132,6 +132,23 @@ TEST_CASE ("tonal: a 4 dB bump at 250 Hz becomes one bell cut on the first free 
     CHECK (m.reason.find ("Hz") != std::string::npos);
 }
 
+TEST_CASE ("tonal: a bypassed EQ layer is switched on as part of the move", "[assistant][tonal]")
+{
+    auto s = flatSnapshot();
+    bump (s, kBand250, 2, 4.0f);
+    const auto target = flatTarget();
+    auto p = defaults();
+    CHECK (find (propose (s, &target, p)[0], "eq.on") == nullptr);   // already on: not listed
+    p["eq.on"] = 0.0f;
+    const auto moves = propose (s, &target, p);
+    REQUIRE (moves.size() == 1);
+    const auto* on = find (moves[0], "eq.on");
+    REQUIRE (on != nullptr);   // without it, accepting the move would change nothing audible
+    CHECK (on->from == 0.0f);
+    CHECK (on->to == 1.0f);
+    CHECK_FALSE (on->scaled);
+}
+
 TEST_CASE ("tonal: overall level does not matter, only the shape against the target", "[assistant][tonal]")
 {
     auto s = flatSnapshot (-12.0f);   // 18 dB hotter than the flat case, same shape
