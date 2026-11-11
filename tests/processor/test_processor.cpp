@@ -2,7 +2,7 @@
 // Contracts tested here:
 //   - buses: mono or stereo main (in == out), optional mono/stereo sidechain, nothing else
 //   - every mapped APVTS parameter lands in exactly its EngineParams field; the only unmapped
-//     ones are stems.* (later module), global.target (assistant), latencyMode and sat.os (config)
+//     ones are global.target (assistant), latencyMode and sat.os (config)
 //   - latencyMode / sat.os changes stay pending until the message thread re-prepares; the new
 //     latency is then reported. Pending compares the *requested* oversampling, so a factor the
 //     engine caps by sample rate does not re-prepare forever
@@ -158,6 +158,15 @@ std::vector<std::pair<std::string, Getter>> fieldTable()
         add (layers[i] + ".depth", [i] (P p) { return f (p.layer[i].depth); });
         add (layers[i] + ".delta", [i] (P p) { return f (p.layer[i].delta); });
     }
+    add ("stems.on", [] (P p) { return f (p.stems.on); });
+    add ("stems.depth", [] (P p) { return f (p.stems.depth); });
+    add ("stems.delta", [] (P p) { return f (p.stems.delta); });
+    const std::array<std::string, dsp::kStems> stems { "voc", "bass", "drm", "oth" };   // dsp::Stem order
+    for (std::size_t i = 0; i < stems.size(); ++i)
+    {
+        add ("stems." + stems[i] + ".gain", [i] (P p) { return f (p.stemsSettings.gainDb[i]); });
+        add ("stems." + stems[i] + ".tilt", [i] (P p) { return f (p.stemsSettings.tiltDbPerOct[i]); });
+    }
 
     for (std::size_t b = 0; b < 8; ++b)
     {
@@ -231,7 +240,7 @@ std::vector<std::pair<std::string, Getter>> fieldTable()
 
 bool isUnmapped (const std::string& id)
 {
-    return id.rfind ("stems.", 0) == 0 || id == "global.target" || id == "global.latencyMode" || id == "sat.os";
+    return id == "global.target" || id == "global.latencyMode" || id == "sat.os";
 }
 
 /** A value inside the range that differs from the default, in plain units. */
@@ -895,7 +904,7 @@ TEST_CASE ("processor: gain match converges to the input loudness and holds thro
     auto l = in, r = in;
     runStereo (*p, l, r, 512, 3);
     CHECK (p->meters().gainMatchDb == Approx (-6.0f).margin (0.3));
-    // The output (gain match included) is back at the input level. Latency is ~0.2 ms in MIX;
+    // The output (gain match included) is back at the input level. Latency is ~25 ms in MIX;
     // a 1 s window makes that irrelevant.
     CHECK (rmsDb (l, n - 48000, n) - rmsDb (in, n - 48000, n) == Approx (0.0).margin (0.5));
 
@@ -906,6 +915,27 @@ TEST_CASE ("processor: gain match converges to the input loudness and holds thro
     setParam (*p, "global.gainMatch", 0.0f);
     p->analysisTick();
     CHECK (p->meters().gainMatchDb == 0.0f);
+}
+
+TEST_CASE ("processor: gain match holds through silence in MASTER too (input and output loudness aligned)", "[processor][analysis]")
+{
+    // The input is measured where the output of the same moment is measured: when the music
+    // stops, both windows empty together. Measured ahead of the output by the plugin's latency
+    // (~100 ms in MASTER), the input window emptied first and the offset drifted until the gate.
+    const JuceScope juce;
+    auto p = makeProc();
+    setParam (*p, "global.latencyMode", 2.0f);
+    setParam (*p, "global.outTrim", 6.0f);
+    setParam (*p, "global.gainMatch", 1.0f);
+    p->prepareToPlay (kFs, 512);
+    REQUIRE (p->getLatencySamples() > 4000);
+    auto in = noise (6 * 48000, 0.1f, 23);
+    auto l = in, r = in;
+    runStereo (*p, l, r, 512, 3);
+    CHECK (p->meters().gainMatchDb == Approx (-6.0f).margin (0.3));
+    std::vector<float> sl (4 * 48000, 0.0f), sr = sl;
+    runStereo (*p, sl, sr, 512, 3);
+    CHECK (p->meters().gainMatchDb == Approx (-6.0f).margin (0.3));
 }
 
 TEST_CASE ("processor: gain match off never sets an offset", "[processor][analysis]")

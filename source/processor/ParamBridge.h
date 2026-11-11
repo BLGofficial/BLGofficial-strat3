@@ -21,6 +21,8 @@ struct ParamBridge
 {
     Raw latencyMode {}, inTrim {}, outTrim {}, gainMatch {}, globalDelta {}, target {};
     std::array<LayerPointers, engine::kDepthLayers> layer {};
+    LayerPointers stems {};
+    std::array<Raw, dsp::kStems> stemGain {}, stemTilt {};   // dsp::Stem order: voc, bass, drm, oth
     Raw ceilingOn {}, ceilingDb {}, dither {}, bits {};
     std::array<EqBandPointers, 8> eq {};
     Raw eqPhase {};

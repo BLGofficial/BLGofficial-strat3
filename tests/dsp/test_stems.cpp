@@ -364,6 +364,82 @@ TEST_CASE ("stems: silence is other", "[dsp][stems]")
     CHECK (meanMask (c, kStemOth, 0, kMaskBins - 1, 0, c.frames - 1) == 1.0);
 }
 
+TEST_CASE ("stems: separating while the audio streams in gives the cache of one pass", "[dsp][stems]")
+{
+    const auto in = mix (mix (tone (3.0, 220.0, 12, 1.0f, 0.6f), clicks (3.0, 0.25)), mix (sine (3.0, 55.0, 0.4f), noise (3.0, 3, 0.05f)));
+    const auto whole = separate (in.l.data(), in.r.data(), in.size(), kFs, 96000);
+
+    StreamSeparator s;
+    begin (s, kFs, maskFramesFor (in.size()) + 100);
+    static constexpr int kChunks[] { 1, 7, 300, 1024, 4096, 511, 513, 2 };
+    int n = 0, i = 0;
+    while (n < in.size())
+    {
+        const int len = std::min (kChunks[i++ % 8], in.size() - n);
+        CHECK (push (s, in.l.data() + n, in.r.data() + n, len) == len);
+        n += len;
+    }
+    CHECK_FALSE (isFull (s));
+    CHECK (pushedSamples (s) == in.size());
+    const auto streamed = finish (s, 96000);
+    CHECK (streamed.sampleRate == whole.sampleRate);
+    CHECK (streamed.startSample == 96000);
+    CHECK (streamed.frames == whole.frames);
+    CHECK (streamed.masks == whole.masks);
+    CHECK (streamed.prints == whole.prints);
+}
+
+TEST_CASE ("stems: a streaming separation stops at its frame budget", "[dsp][stems]")
+{
+    const auto in = noise (3.0);
+    StreamSeparator s;
+    begin (s, kFs, 20);
+    const int fits = 19 * kMaskHop + kMaskFft;   // exactly 20 frames
+    CHECK (push (s, in.l.data(), in.r.data(), 5000) == 5000);
+    CHECK (push (s, in.l.data() + 5000, in.r.data() + 5000, in.size() - 5000) == fits - 5000);
+    CHECK (isFull (s));
+    CHECK (push (s, in.l.data(), in.r.data(), 10) == 0);
+    const auto c = finish (s, 0);
+    const auto expected = separate (in.l.data(), in.r.data(), fits, kFs, 0);
+    CHECK (c.frames == 20);
+    CHECK (c.masks == expected.masks);
+    CHECK (c.prints == expected.prints);
+}
+
+TEST_CASE ("stems: too little audio for one frame gives an empty cache", "[dsp][stems]")
+{
+    const auto in = noise (0.01);
+    StreamSeparator s;
+    begin (s, kFs, 100);
+    push (s, in.l.data(), in.r.data(), in.size());
+    const auto c = finish (s, 0);
+    CHECK (c.frames == 0);
+    CHECK (c.masks.empty());
+}
+
+TEST_CASE ("stems: a frame's masks look exactly 8 frames ahead, no further", "[dsp][stems]")
+{
+    // The time median spans 17 frames, centred: the streaming pass can finish frame f once
+    // frame f + 8 is in. Looking one frame further would need an 18th slot in the ring.
+    // Two takes, the same up to frame D - 2 and different from frame D - 1 on: frames up to
+    // D - 10 must match, frame D - 9 (which sees frame D - 1) must not.
+    constexpr int kD = 60;
+    const auto a = noise (1.0, 5, 0.05f);
+    auto b = a;
+    const auto loud = noise (1.0, 9, 0.8f);
+    std::copy (loud.l.begin() + kD * kMaskHop, loud.l.end(), b.l.begin() + kD * kMaskHop);
+    std::copy (loud.r.begin() + kD * kMaskHop, loud.r.end(), b.r.begin() + kD * kMaskHop);
+
+    const auto ca = separate (a.l.data(), a.r.data(), a.size(), kFs, 0);
+    const auto cb = separate (b.l.data(), b.r.data(), b.size(), kFs, 0);
+    REQUIRE (ca.frames > kD + 8);
+    const auto frameBytes = static_cast<std::ptrdiff_t> (kStems * kMaskBins);
+    const auto upTo = [&] (const MaskCache& c, int f) { return std::vector<std::uint8_t> (c.masks.begin(), c.masks.begin() + (f + 1) * frameBytes); };
+    const auto frame = [&] (const MaskCache& c, int f) { return std::vector<std::uint8_t> (c.masks.begin() + f * frameBytes, c.masks.begin() + (f + 1) * frameBytes); };
+    CHECK (upTo (ca, kD - 10) == upTo (cb, kD - 10));
+    CHECK (frame (ca, kD - 9) != frame (cb, kD - 9));
+}
+
 // ------------------------------------------------------------------- fingerprint
 
 TEST_CASE ("stems: a fingerprint streamed sample by sample is the one computed offline", "[dsp][stems]")

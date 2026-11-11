@@ -271,7 +271,7 @@ TEST_CASE ("assistant: a delta listen pauses the capture until the mix is back",
     const JuceScope juce;
     // Delta replaces the monitor signal, and the output taps sit after the monitor point:
     // analysing it would propose moves for the difference signal, not for the mix.
-    for (const std::string deltaParam : { "global.delta", "eq.delta" })
+    for (const std::string deltaParam : { "global.delta", "eq.delta", "stems.delta" })
     {
         INFO (deltaParam);
         auto p = makeProc();

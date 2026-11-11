@@ -13,8 +13,11 @@ clap-validator. See [Status](#status).
 ## The chain
 
 ```
-IN TRIM -> EQ -> LOW -> MB -> WIDTH -> SAT -> LIMIT -> OUT TRIM -> monitor -> CEILING
+IN TRIM -> STEMS -> EQ -> LOW -> MB -> WIDTH -> SAT -> LIMIT -> OUT TRIM -> monitor -> CEILING
 ```
+
+- **STEMS**: gain and tilt per stem (vocals, bass, drums, other), from masks an analysis pass
+  made beforehand. MIX and MASTER only. See [STEMS](#stems).
 
 - **EQ**: 8 bands, static or dynamic, stereo or mid / side. Linear phase (FIR) in MASTER
   mode, IIR in TRACK and MIX.
@@ -25,8 +28,8 @@ IN TRIM -> EQ -> LOW -> MB -> WIDTH -> SAT -> LIMIT -> OUT TRIM -> monitor -> CE
 - **LIMIT**: look-ahead limiter, three styles (Clean, Dense, Clip).
 - **CEILING**: true-peak safety limiter and dither. Always last, also on the monitor signals.
 
-The six depth layers (EQ to LIMIT) can be reordered. Neighbouring band layers (MB, WIDTH,
-SAT) share one band split. Each layer blends between its input and its output with its own
+STEMS always comes first. The six depth layers after it (EQ to LIMIT) can be reordered.
+Neighbouring band layers (MB, WIDTH, SAT) share one band split. Each layer blends between its input and its output with its own
 depth control. Three latency modes (TRACK, MIX, MASTER). Latency is fixed per mode, so the host's delay compensation does not move
 when a layer is switched on or off.
 
@@ -46,6 +49,27 @@ analysis stay as read-only history. Dragging a move's depth is one undo step in 
 
 The target is your own: play reference tracks through the plugin and capture them (up to
 16). Tonal moves need a target; the loudness and bass moves do not.
+
+## STEMS
+
+STEMS needs an analysis of the song first: arm it (the panel's Analyse button, not built yet),
+play the song (or the part you want), stop.
+The pass follows the host's timeline: it starts when playback starts and ends when playback
+stops, jumps or loops. The separator needs no trained model: it splits by DSP (a percussive /
+harmonic split, a bass band, and the centre of the mid band), so its "vocals" are any
+sustained, centred mid-band sound. The result is looked up by timeline position, so seeks and
+loops find the right place. If the mix changes after the analysis, STEMS notices within about
+30 ms and steps aside until the audio matches again.
+
+The analysis is saved as a compressed file in a per-user folder (macOS
+`~/Library/Application Support/STRAT3/Stems`, Windows `%LOCALAPPDATA%\STRAT3\Stems`, Linux
+`~/.local/share/STRAT3/Stems`): up to about 46 MB per 4 minutes at 48 kHz before
+compression. The project keeps only its name. A project opened on a machine without the file plays without STEMS until it is
+analysed again. One pass holds up to about 11 minutes at 48 kHz. Files are not deleted
+automatically.
+
+STEMS adds 1024 samples (21 ms at 48 kHz) of latency in MIX and MASTER, on or off, so the
+host's delay compensation never moves. TRACK has no STEMS.
 
 ## Advanced
 
@@ -144,10 +168,9 @@ drawer from the header's ASSISTANT button (or the gear, for the advanced panel).
 the plugin works as usual.
 
 Not done yet:
-- STEMS (stem-aware processing) in the plugin. Its DSP is in and tested on its own: a
-  separator that needs no trained model (it splits by DSP, so its "vocals" are any sustained,
-  centred mid-band sound), the mask cache and the layer that applies it. Not yet in the chain,
-  the capture pass or the panel.
+- The STEMS panel: the STEMS row with its four stems, the Analyse button and its progress.
+  STEMS itself (the layer, the analysis pass, the saved analysis) is in and tested, but has
+  no controls in the editor yet; its parameters can be automated from the host.
 - Importing references from audio files.
 - CPU readout per layer.
 
