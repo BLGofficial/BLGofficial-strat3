@@ -99,83 +99,165 @@ inline void store (std::uint8_t* bytes, std::size_t binStride, float voc, float 
 
 } // namespace sepdetail
 
+/** The separator fed as the audio arrives (22b: during the analysis pass), so no copy of the
+ *  whole stretch is ever held. A frame is finished once the 8 frames after it are in. */
+struct StreamSeparator
+{
+    double sampleRate = 48000.0;
+    int maxFrames = 0;
+    std::int64_t maxSamples = 0, pushed = 0;
+    std::unique_ptr<juce::dsp::FFT> fft {};
+    std::vector<float> window {}, workL {}, workR {};
+    std::array<float, kMaskBins> bass {}, band {};
+    std::vector<sepdetail::Frame> ring {};
+    std::vector<float> pendL {}, pendR {};   // the window being filled
+    int pendFill = 0;
+    int analysed = 0, finished = 0;
+    PrintMeter meter {};
+    std::vector<BlockPrint> prints {};
+    std::vector<std::uint8_t> masks {};
+};
+
+namespace sepdetail {
+
+inline constexpr int kHalfSpan = kHpssSpan / 2;
+
+/** Masks for frame f; the time median uses frames [f - 8, last]. */
+inline void finishFrame (StreamSeparator& s, int f, int last) noexcept
+{
+    std::array<float, kHpssSpan> values {};
+    const int f0 = std::max (0, f - kHalfSpan);   // near the edges: the frames there are
+    const auto& now = s.ring[static_cast<std::size_t> (f % kHpssSpan)];
+    for (int k = 0; k < kMaskBins; ++k)
+    {
+        const auto bin = static_cast<std::size_t> (k);
+        auto* bytes = s.masks.data() + maskIndex (f, 0, k);
+        const float mag = now.magnitude[bin];
+        if (mag < kSilentMagnitude)
+        {
+            store (bytes, kMaskBins, 0.0f, 0.0f, 0.0f);
+            continue;
+        }
+
+        int count = 0;
+        for (int t = f0; t <= last; ++t)
+            values[static_cast<std::size_t> (count++)] = s.ring[static_cast<std::size_t> (t % kHpssSpan)].magnitude[bin];
+        const float h = median (values.data(), count);
+
+        count = 0;
+        for (int j = std::max (0, k - kHalfSpan); j <= std::min (kMaskBins - 1, k + kHalfSpan); ++j)
+            values[static_cast<std::size_t> (count++)] = now.magnitude[static_cast<std::size_t> (j)];
+        const float p = median (values.data(), count);
+
+        const float hh = h * h, pp = p * p;
+        const float mh = hh + pp > 0.0f ? hh / (hh + pp) : 0.5f;   // both medians 0: undecided
+        const float centre = now.centre[bin];
+        const float voc = (1.0f - s.bass[bin]) * mh * s.band[bin] * centre * centre;
+        store (bytes, kMaskBins, voc, s.bass[bin] * mh, 1.0f - mh);
+    }
+}
+
+} // namespace sepdetail
+
+/** Allocates for up to `maxFrames` frames (the masks are reserved now, so they never move). */
+inline void begin (StreamSeparator& s, double sampleRate, int maxFrames)
+{
+    s.sampleRate = sampleRate;
+    s.maxFrames = std::max (0, maxFrames);
+    s.maxSamples = s.maxFrames == 0 ? 0 : static_cast<std::int64_t> (s.maxFrames - 1) * kMaskHop + kMaskFft;
+    s.pushed = 0;
+    s.fft = std::make_unique<juce::dsp::FFT> (juce::roundToInt (std::log2 (kMaskFft)));
+    s.window.assign (kMaskFft, 0.0f);
+    for (int i = 0; i < kMaskFft; ++i)
+        s.window[static_cast<std::size_t> (i)] = static_cast<float> (0.5 - 0.5 * std::cos (2.0 * juce::MathConstants<double>::pi * i / kMaskFft));
+    s.workL.assign (2 * kMaskFft, 0.0f);
+    s.workR.assign (2 * kMaskFft, 0.0f);
+    for (std::size_t k = 0; k < kMaskBins; ++k)
+    {
+        const auto hz = static_cast<float> (static_cast<double> (k) * sampleRate / kMaskFft);
+        s.bass[k] = sepdetail::bassWeight (hz);
+        s.band[k] = sepdetail::vocalBand (hz);
+    }
+    s.ring.assign (kHpssSpan, sepdetail::Frame { std::vector<float> (kMaskBins), std::vector<float> (kMaskBins) });
+    s.pendL.assign (kMaskFft, 0.0f);
+    s.pendR.assign (kMaskFft, 0.0f);
+    s.pendFill = 0;
+    s.analysed = s.finished = 0;
+    prepare (s.meter, sampleRate);
+    s.prints.clear();
+    s.prints.reserve (static_cast<std::size_t> (s.maxSamples / kPrintBlock));
+    s.masks.clear();
+    s.masks.reserve (static_cast<std::size_t> (s.maxFrames) * kStems * kMaskBins);
+}
+
+/** Adds samples; returns how many it took (fewer once the frame budget is reached). */
+inline int push (StreamSeparator& s, const float* l, const float* r, int n)
+{
+    const auto room = std::max<std::int64_t> (0, s.maxSamples - s.pushed);
+    const int take = static_cast<int> (std::min<std::int64_t> (std::max (0, n), room));
+    int i = 0;
+    while (i < take)
+    {
+        const int len = std::min (take - i, kMaskFft - s.pendFill);
+        for (int j = 0; j < len; ++j)
+        {
+            const auto at = static_cast<std::size_t> (s.pendFill + j);
+            s.pendL[at] = l[i + j];
+            s.pendR[at] = r[i + j];
+            if (push (s.meter, 0.5f * (l[i + j] + r[i + j])))
+                s.prints.push_back (lastPrint (s.meter));
+        }
+        s.pendFill += len;
+        i += len;
+        if (s.pendFill < kMaskFft)
+            break;
+
+        const int g = s.analysed++;
+        sepdetail::analyse (*s.fft, s.window, s.workL, s.workR, s.pendL.data(), s.pendR.data(), 0,
+                            s.ring[static_cast<std::size_t> (g % kHpssSpan)]);
+        s.masks.resize (static_cast<std::size_t> (s.analysed) * kStems * kMaskBins);
+        if (g >= sepdetail::kHalfSpan)
+            sepdetail::finishFrame (s, s.finished++, g);
+        // Slide the window by one hop.
+        std::copy (s.pendL.begin() + kMaskHop, s.pendL.end(), s.pendL.begin());
+        std::copy (s.pendR.begin() + kMaskHop, s.pendR.end(), s.pendR.begin());
+        s.pendFill = kMaskFft - kMaskHop;
+    }
+    s.pushed += take;
+    return take;
+}
+
+inline bool isFull (const StreamSeparator& s) noexcept { return s.pushed >= s.maxSamples; }
+inline std::int64_t pushedSamples (const StreamSeparator& s) noexcept { return s.pushed; }
+
+/** Finishes the frames still waiting for their medians and hands the cache over; the
+ *  separator is spent. `startSample` is the timeline position of the first sample pushed. */
+inline MaskCache finish (StreamSeparator& s, std::int64_t startSample)
+{
+    while (s.finished < s.analysed)
+        sepdetail::finishFrame (s, s.finished++, s.analysed - 1);
+    MaskCache c;
+    c.sampleRate = s.sampleRate;
+    c.startSample = startSample;
+    c.frames = s.analysed;
+    c.masks = std::move (s.masks);
+    c.prints = std::move (s.prints);
+    s = {};
+    return c;
+}
+
 /**
- * Separates a captured stretch into stem masks and fingerprints it.
+ * Separates a captured stretch into stem masks and fingerprints it, in one pass.
  * @param l, r the stretch as played, `n` samples per channel
  * @param sampleRate the rate it was captured at; the layer only uses the cache at that rate
  * @param startSample the timeline position of l[0]
  */
 inline MaskCache separate (const float* l, const float* r, int n, double sampleRate, std::int64_t startSample)
 {
-    using namespace sepdetail;
-    MaskCache c;
-    c.sampleRate = sampleRate;
-    c.startSample = startSample;
-    c.frames = maskFramesFor (n);
-    c.prints = fingerprints (l, r, n, sampleRate);
-    c.masks.assign (static_cast<std::size_t> (c.frames) * kStems * kMaskBins, 0);
-    if (c.frames == 0)
-        return c;
-
-    juce::dsp::FFT fft (juce::roundToInt (std::log2 (kMaskFft)));
-    std::vector<float> window (kMaskFft), workL (2 * kMaskFft), workR (2 * kMaskFft);
-    for (int i = 0; i < kMaskFft; ++i)
-        window[static_cast<std::size_t> (i)] = static_cast<float> (0.5 - 0.5 * std::cos (2.0 * juce::MathConstants<double>::pi * i / kMaskFft));
-
-    std::array<float, kMaskBins> bass {}, band {};
-    for (std::size_t k = 0; k < kMaskBins; ++k)
-    {
-        const auto hz = static_cast<float> (static_cast<double> (k) * sampleRate / kMaskFft);
-        bass[k] = bassWeight (hz);
-        band[k] = vocalBand (hz);
-    }
-
-    // The time median needs 8 frames either side: a ring of 17 analysed frames, so memory stays
-    // small however long the stretch. Frame f is finished once frame f + 8 is analysed.
-    constexpr int half = kHpssSpan / 2;
-    std::vector<Frame> ring (kHpssSpan, Frame { std::vector<float> (kMaskBins), std::vector<float> (kMaskBins) });
-    std::array<float, kHpssSpan> values {};
-
-    for (int g = 0; g < c.frames + half; ++g)
-    {
-        if (g < c.frames)
-            analyse (fft, window, workL, workR, l, r, g * kMaskHop, ring[static_cast<std::size_t> (g % kHpssSpan)]);
-        const int f = g - half;
-        if (f < 0)
-            continue;
-
-        // Near the edges the medians use the frames and bins there are.
-        const int f0 = std::max (0, f - half), f1 = std::min (c.frames - 1, f + half);
-        const auto& now = ring[static_cast<std::size_t> (f % kHpssSpan)];
-        for (int k = 0; k < kMaskBins; ++k)
-        {
-            const auto bin = static_cast<std::size_t> (k);
-            auto* bytes = c.masks.data() + maskIndex (f, 0, k);
-            const float s = now.magnitude[bin];
-            if (s < kSilentMagnitude)
-            {
-                store (bytes, kMaskBins, 0.0f, 0.0f, 0.0f);
-                continue;
-            }
-
-            int count = 0;
-            for (int t = f0; t <= f1; ++t)
-                values[static_cast<std::size_t> (count++)] = ring[static_cast<std::size_t> (t % kHpssSpan)].magnitude[bin];
-            const float h = median (values.data(), count);
-
-            count = 0;
-            for (int j = std::max (0, k - half); j <= std::min (kMaskBins - 1, k + half); ++j)
-                values[static_cast<std::size_t> (count++)] = now.magnitude[static_cast<std::size_t> (j)];
-            const float p = median (values.data(), count);
-
-            const float hh = h * h, pp = p * p;
-            const float mh = hh + pp > 0.0f ? hh / (hh + pp) : 0.5f;   // both medians 0: undecided
-            const float centre = now.centre[bin];
-            const float voc = (1.0f - bass[bin]) * mh * band[bin] * centre * centre;
-            store (bytes, kMaskBins, voc, bass[bin] * mh, 1.0f - mh);
-        }
-    }
-    return c;
+    StreamSeparator s;
+    begin (s, sampleRate, maskFramesFor (n) + 1);   // + 1: room for every sample, prints included
+    push (s, l, r, n);
+    return finish (s, startSample);
 }
 
 } // namespace strat3::dsp

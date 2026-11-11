@@ -27,6 +27,7 @@
 
 #include "dsp/stems/Fingerprint.h"
 #include "dsp/stems/MaskCache.h"
+#include "dsp/stems/Transport.h"
 
 namespace strat3::dsp {
 
@@ -47,14 +48,6 @@ struct StemsSettings
     std::array<float, kStems> gainDb {};         // -12..12
     std::array<float, kStems> tiltDbPerOct {};   // -6..6
     bool operator== (const StemsSettings&) const = default;
-};
-
-/** What the host says about the block: from its play head. */
-struct Transport
-{
-    bool playing = false;
-    bool hasPosition = false;
-    std::int64_t sample = 0;   // timeline position of the block's first sample
 };
 
 enum class StemsStatus { NoCache, Waiting, Active, Stale };

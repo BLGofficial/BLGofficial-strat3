@@ -895,7 +895,7 @@ TEST_CASE ("processor: gain match converges to the input loudness and holds thro
     auto l = in, r = in;
     runStereo (*p, l, r, 512, 3);
     CHECK (p->meters().gainMatchDb == Approx (-6.0f).margin (0.3));
-    // The output (gain match included) is back at the input level. Latency is ~0.2 ms in MIX;
+    // The output (gain match included) is back at the input level. Latency is ~25 ms in MIX;
     // a 1 s window makes that irrelevant.
     CHECK (rmsDb (l, n - 48000, n) - rmsDb (in, n - 48000, n) == Approx (0.0).margin (0.5));
 
@@ -906,6 +906,27 @@ TEST_CASE ("processor: gain match converges to the input loudness and holds thro
     setParam (*p, "global.gainMatch", 0.0f);
     p->analysisTick();
     CHECK (p->meters().gainMatchDb == 0.0f);
+}
+
+TEST_CASE ("processor: gain match holds through silence in MASTER too (input and output loudness aligned)", "[processor][analysis]")
+{
+    // The input is measured where the output of the same moment is measured: when the music
+    // stops, both windows empty together. Measured ahead of the output by the plugin's latency
+    // (~100 ms in MASTER), the input window emptied first and the offset drifted until the gate.
+    const JuceScope juce;
+    auto p = makeProc();
+    setParam (*p, "global.latencyMode", 2.0f);
+    setParam (*p, "global.outTrim", 6.0f);
+    setParam (*p, "global.gainMatch", 1.0f);
+    p->prepareToPlay (kFs, 512);
+    REQUIRE (p->getLatencySamples() > 4000);
+    auto in = noise (6 * 48000, 0.1f, 23);
+    auto l = in, r = in;
+    runStereo (*p, l, r, 512, 3);
+    CHECK (p->meters().gainMatchDb == Approx (-6.0f).margin (0.3));
+    std::vector<float> sl (4 * 48000, 0.0f), sr = sl;
+    runStereo (*p, sl, sr, 512, 3);
+    CHECK (p->meters().gainMatchDb == Approx (-6.0f).margin (0.3));
 }
 
 TEST_CASE ("processor: gain match off never sets an offset", "[processor][analysis]")

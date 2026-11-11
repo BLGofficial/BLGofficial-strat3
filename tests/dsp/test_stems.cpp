@@ -364,6 +364,59 @@ TEST_CASE ("stems: silence is other", "[dsp][stems]")
     CHECK (meanMask (c, kStemOth, 0, kMaskBins - 1, 0, c.frames - 1) == 1.0);
 }
 
+TEST_CASE ("stems: separating while the audio streams in gives the cache of one pass", "[dsp][stems]")
+{
+    const auto in = mix (mix (tone (3.0, 220.0, 12, 1.0f, 0.6f), clicks (3.0, 0.25)), mix (sine (3.0, 55.0, 0.4f), noise (3.0, 3, 0.05f)));
+    const auto whole = separate (in.l.data(), in.r.data(), in.size(), kFs, 96000);
+
+    StreamSeparator s;
+    begin (s, kFs, maskFramesFor (in.size()) + 100);
+    static constexpr int kChunks[] { 1, 7, 300, 1024, 4096, 511, 513, 2 };
+    int n = 0, i = 0;
+    while (n < in.size())
+    {
+        const int len = std::min (kChunks[i++ % 8], in.size() - n);
+        CHECK (push (s, in.l.data() + n, in.r.data() + n, len) == len);
+        n += len;
+    }
+    CHECK_FALSE (isFull (s));
+    CHECK (pushedSamples (s) == in.size());
+    const auto streamed = finish (s, 96000);
+    CHECK (streamed.sampleRate == whole.sampleRate);
+    CHECK (streamed.startSample == 96000);
+    CHECK (streamed.frames == whole.frames);
+    CHECK (streamed.masks == whole.masks);
+    CHECK (streamed.prints == whole.prints);
+}
+
+TEST_CASE ("stems: a streaming separation stops at its frame budget", "[dsp][stems]")
+{
+    const auto in = noise (3.0);
+    StreamSeparator s;
+    begin (s, kFs, 20);
+    const int fits = 19 * kMaskHop + kMaskFft;   // exactly 20 frames
+    CHECK (push (s, in.l.data(), in.r.data(), 5000) == 5000);
+    CHECK (push (s, in.l.data() + 5000, in.r.data() + 5000, in.size() - 5000) == fits - 5000);
+    CHECK (isFull (s));
+    CHECK (push (s, in.l.data(), in.r.data(), 10) == 0);
+    const auto c = finish (s, 0);
+    const auto expected = separate (in.l.data(), in.r.data(), fits, kFs, 0);
+    CHECK (c.frames == 20);
+    CHECK (c.masks == expected.masks);
+    CHECK (c.prints == expected.prints);
+}
+
+TEST_CASE ("stems: too little audio for one frame gives an empty cache", "[dsp][stems]")
+{
+    const auto in = noise (0.01);
+    StreamSeparator s;
+    begin (s, kFs, 100);
+    push (s, in.l.data(), in.r.data(), in.size());
+    const auto c = finish (s, 0);
+    CHECK (c.frames == 0);
+    CHECK (c.masks.empty());
+}
+
 // ------------------------------------------------------------------- fingerprint
 
 TEST_CASE ("stems: a fingerprint streamed sample by sample is the one computed offline", "[dsp][stems]")

@@ -1,9 +1,15 @@
 #pragma once
 // The fixed-order chain that wires every layer (headless: no AudioProcessor types).
 //
-//   IN TRIM -> six depth layers in EngineConfig::order -> OUT TRIM
+//   IN TRIM -> STEMS -> six depth layers in EngineConfig::order -> OUT TRIM
 //   -> monitor (normal | delta) -> CEILING -> gain match (monitor only)
 //   default order: EQ -> LOW -> [MB -> WIDTH -> SAT, one shared band split] -> LIMIT
+//
+// STEMS (module 22b) is always first and not part of the order. It runs in MIX and MASTER
+// only: its 1024-sample STFT is too much latency for TRACK. Until the impact map gets a STEMS
+// row (22c), its latency and effect are counted in the IN TRIM row. It is an STFT, so the
+// chain runs in three passes per block: IN TRIM per sample, STEMS on the block, the rest per
+// sample. The analysis pass captures the STEMS input (after IN TRIM).
 //
 // Order (Phase 5 rule): neighbouring band layers (MB, WIDTH, SAT) share one split, a band
 // domain; a broadband layer between them starts another. Each domain adds its split latency
@@ -22,16 +28,21 @@
 // Both delta signals still pass the ceiling (ear protection).
 //
 // Gain match [INFERRED]: the analysis thread measures input vs output loudness and sets an
-// offset; it is applied after the ceiling, so it is monitor-only and never printed. It is
-// muted (0 dB) while any delta is heard, or a quiet delta would be boosted by up to +24 dB.
+// offset. The input is measured delayed by the chain's latency, so both meters hear the same
+// moment: when the music stops, both windows empty together (measured ahead, the input's
+// emptied first and the offset ran to the -24 dB limit in MASTER). The offset is applied
+// after the ceiling, so it is monitor-only and never printed. It is muted (0 dB) while any
+// delta is heard, or a quiet delta would be boosted by up to +24 dB.
 //
-// Threads: prepare() on the message thread with the audio stopped; setParams()/process()
-// on the audio thread; requestDesigns() on one background thread (MASTER FIR redesigns);
-// setGainMatchDb() and takeNonFiniteFlag() from any thread.
+// Threads: prepare() and setStemsCapture() on the message thread with the audio stopped;
+// setParams(), process() and setStemsCache() on the audio thread; requestDesigns() on one
+// background thread (MASTER FIR redesigns); setGainMatchDb() and takeNonFiniteFlag() from
+// any thread.
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <vector>
 
 #include "analysis/Correlation.h"
 #include "analysis/ImpactAnalyser.h"
@@ -49,7 +60,10 @@
 #include "dsp/layers/LowLayer.h"
 #include "dsp/layers/MultibandLayer.h"
 #include "dsp/layers/SaturateLayer.h"
+#include "dsp/layers/StemsLayer.h"
 #include "dsp/layers/WidthLayer.h"
+#include "dsp/stems/Capture.h"
+#include "dsp/stems/Transport.h"
 
 namespace strat3::engine {
 
@@ -96,6 +110,8 @@ struct EngineParams
     dsp::SatSettings sat {};
     dsp::LimitSettings limit {};       // ceilingDb is ignored: it follows ceiling.ceilingDb
     dsp::CeilingSettings ceiling {};
+    LayerSwitch stems { false, 100.0f, false };   // stems.on defaults to off
+    dsp::StemsSettings stemsSettings {};
     bool operator== (const EngineParams&) const = default;
 };
 
@@ -159,11 +175,16 @@ struct Engine
     dsp::SaturateLayer sat {};
     dsp::LimitLayer limit {};
     dsp::CeilingLayer ceiling {};
+    dsp::StemsLayer stems {};
+    std::array<std::vector<float>, 2> stemsWet {};   // maxBlock: STEMS runs on the block
+    dsp::StemsCapture* stemsCapture = nullptr;       // not owned; analysis pass only
 
     // ---- depth and alignment
     dsp::DepthBlend<2> eqBlend {}, lowBlend {}, limitBlend {};
     dsp::DepthBlend<8> mbBlend {}, widthBlend {}, satBlend {};
     std::array<dsp::DelayLine, 2> eqDry {};
+    dsp::DepthBlend<2> stemsBlend {};
+    std::array<dsp::DelayLine, 2> stemsDry {}, stemsDeltaDelay {};
     std::array<std::array<dsp::DelayLine, 2>, kDepthLayers> deltaDelay {};
     std::array<dsp::DelayLine, 2> ceilingBypass {};
 
@@ -172,6 +193,7 @@ struct Engine
     float inGain = 1.0f, outGain = 1.0f, matchGain = 1.0f;
     dsp::LinearRamp normalGain {}, globalGain {};
     std::array<dsp::LinearRamp, kDepthLayers> deltaGain {};
+    dsp::LinearRamp stemsDeltaGain {};
     std::atomic<float> gainMatchTargetDb { 0.0f };
     std::atomic<bool> nonFinite { false };
 
@@ -180,12 +202,13 @@ struct Engine
     std::array<int, kDepthLayers> domainOf {};    // per chain slot: band domain, -1 broadband
     std::array<int, kDepthLayers> slotOf {};      // per layer: chain slot
     int domainCount = 1, mbDomain = 0;
-    std::array<int, kRows> rows {};               // per chain position: 0 IN TRIM, 1 + slot, 7, 8
+    std::array<int, kRows> rows {};               // per chain position: 0 IN TRIM (+ STEMS), 1 + slot, 7, 8
     int satOs = 1;
 
     // ---- analysis taps (consumers: the analysis thread)
     analysis::ImpactCapture capture {};
     analysis::LoudnessTap loudIn {}, loudOut {};
+    std::array<dsp::DelayLine, 2> loudInDelay {};   // input loudness at the output's moment
     BlockMeters blockMeters {};
     std::array<analysis::TruePeakDetector, 2> outTp {};   // delivery meter (the CEILING has its own)
     analysis::CorrelationMeter outCorr {};
@@ -195,6 +218,10 @@ struct Engine
     float designedPhase = 100.0f;
     std::array<dsp::CrossoverPoints, kMaxBandDomains> designedXover { dsp::kDefaultCrossovers, dsp::kDefaultCrossovers, dsp::kDefaultCrossovers };
 };
+
+/** The one place that decides where STEMS runs (and adds its latency): MIX and MASTER.
+ *  [INFERRED; pending the owner's pick between this, MASTER only, and only while on] */
+inline constexpr bool stemsInChain (LatencyMode m) noexcept { return m != LatencyMode::Track; }
 
 namespace enginedetail {
 
@@ -258,19 +285,22 @@ inline void snapRamp (dsp::LinearRamp& r) noexcept
 inline void setMonitorTargets (Engine& e) noexcept
 {
     const auto& p = e.params;
+    const bool stemsTop = stemsInChain (e.config.mode) && p.stems.delta;   // STEMS heads the chain
     int top = -1;   // "topmost" = first in the chain
     for (auto k : e.order)
-        if (p.layer[static_cast<std::size_t> (k)].delta)
+        if (! stemsTop && p.layer[static_cast<std::size_t> (k)].delta)
         {
             top = k;
             break;
         }
-    const bool global = top < 0 && p.globalDelta;   // a layer's own delta is more specific
+    const bool layerDelta = stemsTop || top >= 0;
+    const bool global = ! layerDelta && p.globalDelta;   // a layer's own delta is more specific
     for (int i = 0; i < kDepthLayers; ++i)
         setTarget (e.deltaGain[static_cast<std::size_t> (i)], i == top ? 1.0f : 0.0f);
+    setTarget (e.stemsDeltaGain, stemsTop ? 1.0f : 0.0f);
     setTarget (e.globalGain, global ? 1.0f : 0.0f);
-    setTarget (e.normalGain, top < 0 && ! global ? 1.0f : 0.0f);
-    const bool match = p.gainMatch && top < 0 && ! global;
+    setTarget (e.normalGain, ! layerDelta && ! global ? 1.0f : 0.0f);
+    const bool match = p.gainMatch && ! layerDelta && ! global;
     setTarget (e.gainMatchDb, match ? e.gainMatchTargetDb.load (std::memory_order_relaxed) : 0.0f);
 }
 
@@ -288,6 +318,7 @@ inline void resetNonFinite (Engine& e) noexcept
     dsp::resetIfNotFinite (e.sat);
     dsp::resetIfNotFinite (e.limit);
     dsp::resetIfNotFinite (e.ceiling);
+    dsp::resetIfNotFinite (e.stems);
     analysis::resetIfNotFinite (e.loudIn);
     analysis::resetIfNotFinite (e.loudOut);
     if (! analysis::isFinite (e.outCorr))
@@ -318,6 +349,10 @@ inline void resetNonFinite (Engine& e) noexcept
     auto sanitiseAll = [] (auto& lines) { for (auto& d : lines) dsp::sanitise (d); };
     sanitiseAll (e.eqDry);
     sanitiseAll (e.ceilingBypass);
+    sanitiseAll (e.stemsDry);
+    sanitiseAll (e.stemsDeltaDelay);
+    sanitiseAll (e.stemsBlend.dry);
+    sanitiseAll (e.loudInDelay);
     for (auto& pair : e.deltaDelay)
         sanitiseAll (pair);
     for (auto* b : { &e.eqBlend, &e.lowBlend, &e.limitBlend })
@@ -397,6 +432,7 @@ inline void setParams (Engine& e, const EngineParams& in) noexcept
     lim.ceilingDb = p.ceiling.ceilingDb;   // one ceiling control for both stages
     dsp::setSettings (e.limit, lim);
     dsp::setSettings (e.ceiling, p.ceiling);
+    dsp::setSettings (e.stems, p.stemsSettings);
 
     auto depth = [&] (auto& blend, DepthLayer l)
     {
@@ -409,6 +445,7 @@ inline void setParams (Engine& e, const EngineParams& in) noexcept
     depth (e.widthBlend, kWidth);
     depth (e.satBlend, kSat);
     depth (e.limitBlend, kLimit);
+    dsp::setDepth (e.stemsBlend, p.stems.depth, p.stems.on && stemsInChain (e.config.mode));
 
     setTarget (e.inTrim, std::isfinite (p.inTrimDb) ? std::clamp (p.inTrimDb, -24.0f, 24.0f) : e.inTrim.target);
     setTarget (e.outTrim, std::isfinite (p.outTrimDb) ? std::clamp (p.outTrimDb, -24.0f, 24.0f) : e.outTrim.target);
@@ -469,9 +506,14 @@ inline void prepare (Engine& e, const EngineConfig& cfg, const EngineParams& p)
     dsp::prepare (e.sat, fs, e.satOs, master ? dsp::OsKind::Fir : dsp::OsKind::Iir);
     dsp::prepare (e.limit, fs, dsp::kLimitLookaheadMs[modeIndex]);
     dsp::prepare (e.ceiling, fs, e.config.mode != LatencyMode::Track);
+    dsp::prepare (e.stems, fs);   // keeps the cache pointer and the settings
+    for (auto& w : e.stemsWet)
+        w.assign (static_cast<size_t> (e.config.maxBlock), 0.0f);
 
     // ---- rows: what each chain position adds; a split counts at the head of its run
     e.rows = {};
+    const int stemsLatency = stemsInChain (e.config.mode) ? dsp::latencySamples (e.stems) : 0;
+    e.rows[kRowInTrim] = stemsLatency;
     for (std::size_t s = 0; s < kDepthLayers; ++s)
     {
         int lat = 0;
@@ -491,8 +533,9 @@ inline void prepare (Engine& e, const EngineConfig& cfg, const EngineParams& p)
     const int total = latencySamples (e);
 
     // The sidechain must meet the main bands at MB's input: everything up to and including
-    // MB's row (MB itself adds nothing; its row holds the split when MB heads the run).
-    int sidechainDelay = 0;
+    // MB's row (MB itself adds nothing; its row holds the split when MB heads the run), and
+    // STEMS ahead of all of it.
+    int sidechainDelay = e.rows[kRowInTrim];
     for (int s = 0; s <= e.slotOf[kMb]; ++s)
         sidechainDelay += e.rows[static_cast<std::size_t> (1 + s)];
     e.sidechainPoints = dsp::activeCrossovers (e.domains[static_cast<std::size_t> (e.mbDomain)]);
@@ -513,6 +556,18 @@ inline void prepare (Engine& e, const EngineConfig& cfg, const EngineParams& p)
         dsp::prepare (d, static_cast<std::size_t> (e.rows[kRowCeiling]));
         dsp::setDelay (d, static_cast<std::size_t> (e.rows[kRowCeiling]));
     }
+    // STEMS: dry delayed by the layer (as for EQ), and its addition carried past all six layers.
+    dsp::prepare (e.stemsBlend, fs, 0);
+    int sixLayers = 0;
+    for (std::size_t s = 0; s < kDepthLayers; ++s)
+        sixLayers += e.rows[1 + s];
+    for (std::size_t ch = 0; ch < 2; ++ch)
+    {
+        dsp::prepare (e.stemsDry[ch], static_cast<std::size_t> (stemsLatency));
+        dsp::setDelay (e.stemsDry[ch], static_cast<std::size_t> (stemsLatency));
+        dsp::prepare (e.stemsDeltaDelay[ch], static_cast<std::size_t> (std::max (1, sixLayers)));
+        dsp::setDelay (e.stemsDeltaDelay[ch], static_cast<std::size_t> (sixLayers));
+    }
     // From each layer's output to the monitor point (after the last layer).
     for (std::size_t k = 0; k < kDepthLayers; ++k)
     {
@@ -528,6 +583,11 @@ inline void prepare (Engine& e, const EngineConfig& cfg, const EngineParams& p)
 
     analysis::prepare (e.capture, kRows + 1);
     analysis::prepare (e.loudIn, fs);
+    for (auto& d : e.loudInDelay)
+    {
+        dsp::prepare (d, static_cast<std::size_t> (std::max (1, total)));
+        dsp::setDelay (d, static_cast<std::size_t> (total));
+    }
     analysis::prepare (e.loudOut, fs);
     analysis::prepare (e.outCorr, fs);
     for (auto& d : e.outTp)
@@ -542,6 +602,7 @@ inline void prepare (Engine& e, const EngineConfig& cfg, const EngineParams& p)
     e.globalGain = dsp::makeLinearRamp (kMonitorRampMs, fs, 0.0f);
     for (auto& g : e.deltaGain)
         g = dsp::makeLinearRamp (kMonitorRampMs, fs, 0.0f);
+    e.stemsDeltaGain = dsp::makeLinearRamp (kMonitorRampMs, fs, 0.0f);
     e.nonFinite.store (false);
 
     setParams (e, p);
@@ -552,11 +613,11 @@ inline void prepare (Engine& e, const EngineConfig& cfg, const EngineParams& p)
     dsp::snapToTargets (e.sat);
     dsp::snapToTargets (e.limit);
     dsp::snapToTargets (e.ceiling);
-    for (auto* b : { &e.eqBlend, &e.lowBlend, &e.limitBlend })
+    for (auto* b : { &e.eqBlend, &e.lowBlend, &e.limitBlend, &e.stemsBlend })
         dsp::snapToTarget (*b);
     for (auto* b : { &e.mbBlend, &e.widthBlend, &e.satBlend })
         dsp::snapToTarget (*b);
-    for (auto* r : { &e.inTrim, &e.outTrim, &e.ceilingMix, &e.gainMatchDb, &e.normalGain, &e.globalGain })
+    for (auto* r : { &e.inTrim, &e.outTrim, &e.ceilingMix, &e.gainMatchDb, &e.normalGain, &e.globalGain, &e.stemsDeltaGain })
         snapRamp (*r);
     for (auto& g : e.deltaGain)
         snapRamp (g);
@@ -601,58 +662,77 @@ inline void setGainMatchDb (Engine& e, float db) noexcept
         e.gainMatchTargetDb.store (std::clamp (db, -kGainMatchMaxDb, kGainMatchMaxDb), std::memory_order_relaxed);
 }
 
+/** Audio thread: the mask cache STEMS reads, null for none. Not owned: the caller keeps it
+ *  alive until the audio thread has been handed another. Same pointer again: no change. */
+inline void setStemsCache (Engine& e, const dsp::MaskCache* cache) noexcept { dsp::setCache (e.stems, cache); }
+
+/** Message thread, audio stopped: where process() offers the STEMS input during an analysis
+ *  pass (MIX and MASTER only). Not owned; null for none. */
+inline void setStemsCapture (Engine& e, dsp::StemsCapture* capture) noexcept { e.stemsCapture = capture; }
+
+/** Audio thread: what STEMS is doing with its cache (read it right after process()). */
+inline dsp::StemsStatus stemsStatus (const Engine& e) noexcept { return dsp::status (e.stems); }
+
 /** Any thread: true once after a block was muted for a non-finite sample. */
 inline bool takeNonFiniteFlag (Engine& e) noexcept { return e.nonFinite.exchange (false, std::memory_order_acq_rel); }
 
-/** Audio thread. In place on l and r (stereo; mono hosts duplicate L). sidechainL/R may be
- *  null (no sidechain bus), in which case MULTIBAND uses its internal detector. */
-inline void process (Engine& e, float* l, float* r, int numSamples,
-                     const float* sidechainL = nullptr, const float* sidechainR = nullptr) noexcept
+namespace enginedetail {
+
+/** At most maxBlock samples, all finite. Meters accumulate into blockMeters. */
+inline void processPiece (Engine& e, float* l, float* r, int numSamples,
+                          const float* sidechainL, const float* sidechainR, const dsp::Transport& t) noexcept
 {
-    using namespace enginedetail;
-    if (numSamples <= 0 || l == nullptr || r == nullptr)
-        return;
-
-    // A non-finite input never enters the state: replace it, process (timing stays intact),
-    // then mute the block and raise the flag.
-    bool bad = false;
-    for (int i = 0; i < numSamples; ++i)
-        if (! std::isfinite (l[i]) || ! std::isfinite (r[i]))
-        {
-            bad = true;
-            l[i] = finiteOr0 (l[i]);
-            r[i] = finiteOr0 (r[i]);
-        }
-
     setMonitorTargets (e);   // picks up a new gain-match offset without a setParams
     dsp::beginBlock (e.eqFir);
     for (int d = 0; d < e.domainCount; ++d)
         dsp::beginBlock (e.domains[static_cast<std::size_t> (d)]);
     analysis::beginBlock (e.capture, numSamples);
     auto& bm = e.blockMeters;
-    bm.inPeak = { 0.0f, 0.0f };
-    bm.outPeak = { 0.0f, 0.0f };
-    bm.outTruePeak = 0.0f;
-    bm.grDb = 0.0f;
     const bool meterLimit = e.params.layer[kLimit].on, meterCeiling = e.params.ceilingOn;
     const bool external = e.params.mb.sidechain == dsp::MbSidechain::External
                        && sidechainL != nullptr && sidechainR != nullptr;
 
+    // ---- pass 1, per sample: input meters and IN TRIM, in place
     for (int i = 0; i < numSamples; ++i)
     {
-        auto tap = [&] (int t, float a, float b) { analysis::write (e.capture, t, i, a, b); };
-        float x[2] { l[i], r[i] };
-        tap (0, x[0], x[1]);
-        bm.inPeak[0] = std::max (bm.inPeak[0], std::abs (x[0]));
-        bm.inPeak[1] = std::max (bm.inPeak[1], std::abs (x[1]));
-        analysis::push (e.loudIn, x[0], x[1]);
-
-        // ---- IN TRIM
+        analysis::write (e.capture, 0, i, l[i], r[i]);
+        bm.inPeak[0] = std::max (bm.inPeak[0], std::abs (l[i]));
+        bm.inPeak[1] = std::max (bm.inPeak[1], std::abs (r[i]));
+        analysis::push (e.loudIn, dsp::process (e.loudInDelay[0], l[i]), dsp::process (e.loudInDelay[1], r[i]));
         if (isSmoothing (e.inTrim))
             e.inGain = dbToGain (step (e.inTrim));
-        x[0] *= e.inGain;
-        x[1] *= e.inGain;
-        tap (1, x[0], x[1]);
+        l[i] *= e.inGain;
+        r[i] *= e.inGain;
+    }
+
+    // ---- pass 2, the block: STEMS is an STFT. l / r keep its input (the dry path).
+    const bool stems = stemsInChain (e.config.mode) && static_cast<int> (e.stemsWet[0].size()) >= numSamples;
+    float* wetL = e.stemsWet[0].data();
+    float* wetR = e.stemsWet[1].data();
+    if (stems)
+    {
+        if (e.stemsCapture != nullptr)
+            dsp::write (*e.stemsCapture, l, r, numSamples, t);
+        std::copy (l, l + numSamples, wetL);
+        std::copy (r, r + numSamples, wetR);
+        dsp::process (e.stems, wetL, wetR, numSamples, t);
+    }
+
+    // ---- pass 3, per sample: STEMS depth, the six layers, monitor, CEILING
+    for (int i = 0; i < numSamples; ++i)
+    {
+        auto tap = [&] (int tp, float a, float b) { analysis::write (e.capture, tp, i, a, b); };
+        float x[2] { l[i], r[i] };
+        float stemsDiff[2] { 0.0f, 0.0f };
+        if (stems)
+        {
+            const float dry[2] { dsp::process (e.stemsDry[0], x[0]), dsp::process (e.stemsDry[1], x[1]) };
+            const float wet[2] { wetL[i], wetR[i] };
+            dsp::process (e.stemsBlend, dry, wet, x);
+            stemsDiff[0] = x[0] - dry[0];
+            stemsDiff[1] = x[1] - dry[1];
+        }
+        tap (1, x[0], x[1]);   // IN TRIM row: IN TRIM and STEMS until STEMS gets its own row
 
         std::array<std::array<float, 2>, kDepthLayers> diff {};
         auto diff2 = [&] (DepthLayer k, const float* out, const float* dry)
@@ -750,7 +830,7 @@ inline void process (Engine& e, float* l, float* r, int numSamples,
         }
 
         // ---- monitor: normal, one layer's delta, or the sum of all of them
-        const float gN = step (e.normalGain), gG = step (e.globalGain);
+        const float gN = step (e.normalGain), gG = step (e.globalGain), gS = step (e.stemsDeltaGain);
         float m[2] { gN * y[0], gN * y[1] };
         for (std::size_t k = 0; k < kDepthLayers; ++k)
         {
@@ -758,6 +838,9 @@ inline void process (Engine& e, float* l, float* r, int numSamples,
             for (std::size_t c = 0; c < 2; ++c)
                 m[c] += (gG + gk) * dsp::process (e.deltaDelay[k][c], diff[k][c]);
         }
+        if (stems)
+            for (std::size_t c = 0; c < 2; ++c)
+                m[c] += (gG + gS) * dsp::process (e.stemsDeltaDelay[c], stemsDiff[c]);
 
         // ---- OUT TRIM
         if (isSmoothing (e.outTrim))
@@ -800,8 +883,50 @@ inline void process (Engine& e, float* l, float* r, int numSamples,
     }
 
     analysis::endBlock (e.capture);
-    bm.correlation = analysis::value (e.outCorr);
     flushDenormals (e);
+}
+
+} // namespace enginedetail
+
+/** Audio thread. In place on l and r (stereo; mono hosts duplicate L). sidechainL/R may be
+ *  null (no sidechain bus), in which case MULTIBAND uses its internal detector. `transport`
+ *  is the host's timeline at the block's first sample (STEMS and its analysis pass need it;
+ *  the default, not playing, bypasses STEMS). A block longer than maxBlock is processed in
+ *  pieces, each at its own position. */
+inline void process (Engine& e, float* l, float* r, int numSamples,
+                     const float* sidechainL = nullptr, const float* sidechainR = nullptr,
+                     const dsp::Transport& transport = {}) noexcept
+{
+    using namespace enginedetail;
+    if (numSamples <= 0 || l == nullptr || r == nullptr)
+        return;
+
+    // A non-finite input never enters the state: replace it, process (timing stays intact),
+    // then mute the block and raise the flag.
+    bool bad = false;
+    for (int i = 0; i < numSamples; ++i)
+        if (! std::isfinite (l[i]) || ! std::isfinite (r[i]))
+        {
+            bad = true;
+            l[i] = finiteOr0 (l[i]);
+            r[i] = finiteOr0 (r[i]);
+        }
+
+    auto& bm = e.blockMeters;
+    bm.inPeak = { 0.0f, 0.0f };
+    bm.outPeak = { 0.0f, 0.0f };
+    bm.outTruePeak = 0.0f;
+    bm.grDb = 0.0f;
+    const int piece = std::max (1, e.config.maxBlock);
+    for (int at = 0; at < numSamples; at += piece)
+    {
+        auto t = transport;
+        t.sample += at;
+        processPiece (e, l + at, r + at, std::min (piece, numSamples - at),
+                      sidechainL != nullptr ? sidechainL + at : nullptr,
+                      sidechainR != nullptr ? sidechainR + at : nullptr, t);
+    }
+    bm.correlation = analysis::value (e.outCorr);
 
     for (int i = 0; i < numSamples && ! bad; ++i)
         bad = ! std::isfinite (l[i]) || ! std::isfinite (r[i]);
