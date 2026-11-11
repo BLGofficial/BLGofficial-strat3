@@ -144,7 +144,10 @@ drawer from the header's ASSISTANT button (or the gear, for the advanced panel).
 the plugin works as usual.
 
 Not done yet:
-- STEMS (stem-aware processing).
+- STEMS (stem-aware processing) in the plugin. Its DSP is in and tested on its own: a
+  separator that needs no trained model (it splits by DSP, so its "vocals" are any sustained,
+  centred mid-band sound), the mask cache and the layer that applies it. Not yet in the chain,
+  the capture pass or the panel.
 - Importing references from audio files.
 - CPU readout per layer.
 
