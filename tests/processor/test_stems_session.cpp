@@ -14,7 +14,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <chrono>
 #include <numbers>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -164,6 +166,13 @@ TEST_CASE ("stems file: a foreign, truncated or damaged file is refused", "[proc
     const auto liar = tmp.dir.getChildFile ("liar.s3stems");
     REQUIRE (processor::writeCacheFile (lying, liar));
     CHECK_FALSE (processor::readCacheFile (liar).has_value());
+
+    // ... or fewer: the bytes left over are refused too.
+    auto modest = cache;
+    modest.frames -= 1;
+    const auto shorter = tmp.dir.getChildFile ("shorter.s3stems");
+    REQUIRE (processor::writeCacheFile (modest, shorter));
+    CHECK_FALSE (processor::readCacheFile (shorter).has_value());
 }
 
 TEST_CASE ("stems file: only ids the plugin makes ever become a path", "[processor][stems][file]")
@@ -172,6 +181,7 @@ TEST_CASE ("stems file: only ids the plugin makes ever become a path", "[process
     for (const std::string bad : { "", "../../secret", "a/b", "C:\\\\x",
                                    "0123456789abcdef0123456789abcdef0123",       // 36, no dashes
                                    "01234567-89AB-CDEF-0123-456789ABCDEF",       // upper case
+                                   "0123456g-89ab-cdef-0123-456789abcdef",       // not hex
                                    "01234567-89ab-cdef-0123-456789abcdef.s3stems",
                                    "01234567-89ab-cdef-0123-456789abcde/" })
     {
@@ -235,6 +245,35 @@ TEST_CASE ("stems session: a pass starts when the host plays and its result beco
     const auto saved = processor::readCacheFile (file);
     REQUIRE (saved.has_value());
     CHECK (sameCache (*saved, *cache));
+}
+
+TEST_CASE ("stems session: a pass too short for one frame leaves things as they were", "[processor][stems]")
+{
+    const TempDir tmp;
+    StemsSession s;
+    prepared (s, tmp.dir);
+    analyse (s, 0.01);   // 480 samples < 1024
+    const auto i = processor::info (s);
+    CHECK (i.phase == StemsPhase::Idle);
+    CHECK (i.lastEnd == dsp::CaptureEnd::Stopped);
+    CHECK (processor::cacheForAudio (s) == nullptr);
+    CHECK (processor::cacheId (s).empty());
+    CHECK (tmp.files() == 0);
+}
+
+TEST_CASE ("stems session: a cache that cannot be saved still plays, and the state does not name it", "[processor][stems]")
+{
+    const TempDir tmp;
+    const auto notAFolder = tmp.dir.getChildFile ("occupied");
+    REQUIRE (notAFolder.replaceWithText ("a file where the folder should be"));
+    StemsSession s;
+    prepared (s, notAFolder);
+    analyse (s, 1.0);
+    const auto i = processor::info (s);
+    CHECK (i.phase == StemsPhase::Ready);
+    CHECK (i.saveFailed);
+    CHECK (processor::cacheForAudio (s) != nullptr);
+    CHECK (processor::cacheId (s).empty());
 }
 
 TEST_CASE ("stems session: a replaced cache is freed only after the audio thread took its successor", "[processor][stems]")
@@ -386,16 +425,17 @@ void setParam (Strat3Processor& p, const std::string& id, float value)
 /** The host plays l/r from timeline position 0 through the plugin; the STEMS worker runs
  *  every 8 blocks. Returns the output. */
 std::pair<std::vector<float>, std::vector<float>> hostPlays (Strat3Processor& p, TestPlayHead& head,
-                                                             const std::vector<float>& l, const std::vector<float>& r)
+                                                             const std::vector<float>& l, const std::vector<float>& r,
+                                                             int block = kBlock)
 {
     auto ol = l, or_ = r;
     juce::MidiBuffer midi;
     const int n = static_cast<int> (l.size());
     head.playing = true;
     int blocks = 0;
-    for (int i = 0; i < n; i += kBlock)
+    for (int i = 0; i < n; i += block)
     {
-        const int len = std::min (kBlock, n - i);
+        const int len = std::min (block, n - i);
         head.sample = i;
         float* ch[] { ol.data() + i, or_.data() + i };
         juce::AudioBuffer<float> buf (ch, 2, len);
@@ -446,8 +486,9 @@ TEST_CASE ("processor stems: Analyse while the host plays, then the bass gain ap
     const int lat = p->getLatencySamples();
     CHECK_THAT (levelDb (al, samples (1.0) + lat, samples (3.0) + lat) - levelDb (l, samples (1.0), samples (3.0)), WithinAbs (0.0, 0.3));
 
-    // Played again: the 55 Hz bass (most of the energy) comes down.
-    const auto [pl, pr] = hostPlays (*p, head, l, r);
+    // Played again, in host blocks larger than prepared (processed in pieces, each at its own
+    // position): the 55 Hz bass (most of the energy) comes down.
+    const auto [pl, pr] = hostPlays (*p, head, l, r, 3 * kBlock);
     const double change = levelDb (pl, samples (1.0) + lat, samples (3.0) + lat) - levelDb (l, samples (1.0), samples (3.0));
     INFO ("change " << change << " dB");
     CHECK (change < -6.0);
@@ -519,4 +560,58 @@ TEST_CASE ("processor stems: the cache reference is saved with the plugin state 
         back->stemsTick();
         CHECK (back->stemsInfo().phase == StemsPhase::Ready);
     }
+}
+
+TEST_CASE ("processor stems: the worker thread analyses alongside the audio thread", "[processor][stems][threads]")
+{
+    // The real threads: the STEMS worker drains and finishes while this thread is the audio
+    // thread. Paced at about 5x real time, well inside the 2 s capture ring.
+    const JuceScope juce;
+    const TempDir tmp;
+    auto p = std::make_unique<Strat3Processor> (true);
+    p->setStemsDirectory (tmp.dir);
+    TestPlayHead head;
+    p->setPlayHead (&head);
+    setParam (*p, "stems.on", 1.0f);
+    p->prepareToPlay (kFs, kBlock);
+    std::vector<float> l, r;
+    program (l, r, samples (3.0));
+    REQUIRE (p->startStemsAnalysis());
+
+    auto playOnce = [&]
+    {
+        juce::MidiBuffer midi;
+        auto ol = l, or_ = r;
+        head.playing = true;
+        for (int i = 0; i + kBlock <= static_cast<int> (ol.size()); i += kBlock)
+        {
+            head.sample = i;
+            float* ch[] { ol.data() + i, or_.data() + i };
+            juce::AudioBuffer<float> buf (ch, 2, kBlock);
+            p->processBlock (buf, midi);
+            std::this_thread::sleep_for (std::chrono::milliseconds (2));
+        }
+        head.playing = false;
+        float* ch[] { ol.data(), or_.data() };
+        juce::AudioBuffer<float> buf (ch, 2, kBlock);
+        p->processBlock (buf, midi);
+    };
+    auto waitFor = [&] (StemsPhase phase)
+    {
+        for (int i = 0; i < 400 && p->stemsInfo().phase != phase; ++i)
+            std::this_thread::sleep_for (std::chrono::milliseconds (25));
+        return p->stemsInfo().phase == phase;
+    };
+
+    playOnce();
+    REQUIRE (waitFor (StemsPhase::Ready));
+    CHECK (p->stemsInfo().lastEnd == dsp::CaptureEnd::Stopped);
+    // A second pass replaces the first while the audio thread keeps using the cache.
+    REQUIRE (p->startStemsAnalysis());
+    playOnce();
+    REQUIRE (waitFor (StemsPhase::Ready));
+    playOnce();   // takes the new cache; the worker may now free the old one
+    CHECK (p->stemsLayerStatus() != dsp::StemsStatus::NoCache);
+    CHECK (tmp.files() == 2);
+    p->setPlayHead (nullptr);
 }
