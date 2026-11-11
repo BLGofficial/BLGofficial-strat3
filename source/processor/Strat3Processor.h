@@ -39,6 +39,7 @@
 #include "assistant/Session.h"
 #include "engine/Engine.h"
 #include "processor/ParamBridge.h"
+#include "processor/StemsSession.h"
 
 namespace strat3::processor {
 
@@ -54,6 +55,13 @@ inline constexpr float kMeterFloorDb = -100.0f;       // peaks of silence; also 
 // chain's latency (up to ~150 ms in MASTER) and the 400 ms loudness gate: hold the assistant
 // capture for half a second more. Own tuning [INFERRED].
 inline constexpr int kAssistantDeltaHoldTicks = kAnalysisHz / 2;
+
+/** In the plugin state's EXTRA tree: the id of the STEMS cache file. */
+inline const juce::Identifier kStemsStateType { "STEMS" };
+inline const juce::Identifier kStemsCacheProperty { "cache" };
+
+/** The STEMS worker's period: it must drain the capture ring (kStemsRingSeconds) in time. */
+inline constexpr int kStemsTickMs = 50;
 
 struct Meters
 {
@@ -162,6 +170,21 @@ public:
     /** Changes whenever assistantState() would: the panel polls this, not the JSON. */
     std::uint32_t assistantRevision() const noexcept { return assistantRev.load(); }
 
+    // ---- STEMS (module 22b)
+    /** Message thread. Arms an analysis pass of the STEMS input: it runs while the host plays
+     *  and ends when the host stops, seeks or loops. False in TRACK (no STEMS there), before
+     *  prepareToPlay, or while a pass is armed or running. */
+    bool startStemsAnalysis();
+    /** Message thread. Drops a pass in progress; the cache in use stays. */
+    void cancelStemsAnalysis();
+    StemsInfo stemsInfo() const;
+    /** What STEMS did with its cache in the last block (the audio thread's view). */
+    dsp::StemsStatus stemsLayerStatus() const noexcept;
+    /** The STEMS worker's step (its thread runs it; tests with the threads off call it). */
+    void stemsTick();
+    /** Tests: where cache files go (default: defaultStemsDirectory()). */
+    void setStemsDirectory (const juce::File& dir);
+
     /** Non-automatable state (layer order). The assistant session is saved next to it, from
      *  the live session, not from this tree. Message thread. */
     juce::ValueTree extraState;
@@ -217,8 +240,13 @@ private:
     void applyParamSet (const assistant::ParamSet&, std::optional<double> dragAt = std::nullopt);
     std::map<std::string, double> dragGestures;          // message thread: parameter id -> last touch (s)
 
+    StemsSession stems {};
+    std::atomic<int> stemsLayerState { static_cast<int> (dsp::StemsStatus::NoCache) };
+    struct StemsThread;
+
     const bool runAnalysisThread;
     std::unique_ptr<AnalysisThread> analysisThread;
+    std::unique_ptr<StemsThread> stemsThread;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Strat3Processor)
 };

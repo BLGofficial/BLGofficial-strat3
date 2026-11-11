@@ -65,6 +65,24 @@ struct Strat3Processor::AnalysisThread final : juce::Thread
     Strat3Processor& owner;
 };
 
+// STEMS work runs apart from the meters: finishing a pass and saving or loading a cache file
+// can take a second or more, which would freeze the meters on the analysis thread.
+struct Strat3Processor::StemsThread final : juce::Thread
+{
+    explicit StemsThread (Strat3Processor& o) : juce::Thread ("STRAT3 stems"), owner (o) {}
+
+    void run() override
+    {
+        while (! threadShouldExit())
+        {
+            owner.stemsTick();
+            wait (kStemsTickMs);
+        }
+    }
+
+    Strat3Processor& owner;
+};
+
 Strat3Processor::Strat3Processor (bool runThread)
     : AudioProcessor (BusesProperties()
                           .withInput ("Input", Set::stereo(), true)
@@ -80,10 +98,13 @@ Strat3Processor::Strat3Processor (bool runThread)
     requestedOrder.store (encodeOrder (engineOrder (params::decodeLayerOrder (extraState))));
     preparedOrderCode.store (requestedOrder.load());
     assistant::prepare (session);
+    processor::setDirectory (stems, defaultStemsDirectory());
     if (runAnalysisThread)
     {
         analysisThread = std::make_unique<AnalysisThread> (*this);
         analysisThread->startThread (juce::Thread::Priority::low);
+        stemsThread = std::make_unique<StemsThread> (*this);
+        stemsThread->startThread (juce::Thread::Priority::low);
     }
 }
 
@@ -92,6 +113,8 @@ Strat3Processor::~Strat3Processor()
     // The thread calls back into this object: stop it before any member goes.
     if (analysisThread != nullptr)
         analysisThread->stopThread (2000);
+    if (stemsThread != nullptr)
+        stemsThread->stopThread (10000);   // may be finishing a file write
     cancelPendingUpdate();
 }
 
@@ -170,6 +193,9 @@ void Strat3Processor::prepareEngine (double sampleRate, int maxBlock)
         engine::prepare (*engine, cfg, readParams (params, mono));
         config = engine->config;   // sanitised rate and block size
         config.satOs = cfg.satOs;  // keep the requested factor: pending compares against it
+        processor::prepare (stems, config.sampleRate);   // cancels a pass: its timeline is gone
+        engine::setStemsCapture (*engine, &stems.ring);
+        stemsLayerState.store (static_cast<int> (engine::stemsStatus (*engine)));
 
         latency = engine::latencySamples (*engine);
         for (auto& d : bypassDelay)
@@ -255,6 +281,21 @@ void Strat3Processor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     }
 
     engine::setParams (*engine, readParams (params, mono));
+    engine::setStemsCache (*engine, processor::cacheForAudio (stems));
+
+    // Where the host is: STEMS looks its masks up by timeline position, and its analysis
+    // pass follows the transport.
+    dsp::Transport transport;
+    if (auto* head = getPlayHead())
+        if (const auto pos = head->getPosition())
+        {
+            transport.playing = pos->getIsPlaying();
+            if (const auto at = pos->getTimeInSamples())
+            {
+                transport.hasPosition = true;
+                transport.sample = *at;
+            }
+        }
 
     // Hosts may exceed the prepared block size; the engine and scratchR are sized for it.
     const int maxBlock = config.maxBlock;
@@ -271,11 +312,14 @@ void Strat3Processor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         if (! mono)
             for (int i = 0; i < len; ++i)
                 dsp::process (bypassDelay[1], cr[i]);
+        auto t = transport;
+        t.sample += off;
         engine::process (*engine, cl, cr, len,
                          scL != nullptr ? scL + off : nullptr,
-                         scR != nullptr ? scR + off : nullptr);
+                         scR != nullptr ? scR + off : nullptr, t);
         publishMeters (engine::blockMeters (*engine));
     }
+    stemsLayerState.store (static_cast<int> (engine::stemsStatus (*engine)), std::memory_order_relaxed);
 
     if (engine::takeNonFiniteFlag (*engine))
         nonFiniteLatched.store (true, std::memory_order_relaxed);
@@ -440,8 +484,11 @@ assistant::ParamValues Strat3Processor::currentParamValues() const
 
 bool Strat3Processor::deltaHeard() const noexcept
 {
-    // Same rule as engine::setMonitorTargets: any layer's delta, or the global one.
+    // Same rule as engine::setMonitorTargets: any layer's delta (STEMS only where it runs),
+    // or the global one.
     if (params.globalDelta->load (std::memory_order_relaxed) >= 0.5f)
+        return true;
+    if (engine::stemsInChain (preparedMode()) && params.stems.delta->load (std::memory_order_relaxed) >= 0.5f)
         return true;
     for (const auto& layer : params.layer)
         if (layer.delta->load (std::memory_order_relaxed) >= 0.5f)
@@ -599,6 +646,29 @@ juce::var Strat3Processor::assistantState()
     return assistant::stateToVar (session, capturePaused.load());
 }
 
+// ------------------------------------------------------------------- STEMS
+
+bool Strat3Processor::startStemsAnalysis()
+{
+    // TRACK has no STEMS, so nothing would ever be captured.
+    if (! prepared.load() || ! engine::stemsInChain (preparedMode()))
+        return false;
+    return processor::start (stems);
+}
+
+void Strat3Processor::cancelStemsAnalysis() { processor::cancel (stems); }
+
+StemsInfo Strat3Processor::stemsInfo() const { return processor::info (stems); }
+
+dsp::StemsStatus Strat3Processor::stemsLayerStatus() const noexcept
+{
+    return static_cast<dsp::StemsStatus> (stemsLayerState.load (std::memory_order_relaxed));
+}
+
+void Strat3Processor::stemsTick() { processor::tick (stems); }
+
+void Strat3Processor::setStemsDirectory (const juce::File& dir) { processor::setDirectory (stems, dir); }
+
 // ------------------------------------------------------------------- editor and state
 
 juce::AudioProcessorEditor* Strat3Processor::createEditor()
@@ -613,6 +683,10 @@ void Strat3Processor::getStateInformation (juce::MemoryBlock& dest)
         const std::lock_guard lock (assistantLock);
         extra.appendChild (assistant::toTree (session), nullptr);
     }
+    // The cache itself lives in a file (tens of MB); the state names it.
+    juce::ValueTree stemsTree (kStemsStateType);
+    stemsTree.setProperty (kStemsCacheProperty, juce::String (processor::cacheId (stems)), nullptr);
+    extra.appendChild (stemsTree, nullptr);
     const auto envelope = params::wrapState (apvts.copyState(), extra);
     if (const auto xml = envelope.createXml())
         copyXmlToBinary (*xml, dest);
@@ -640,6 +714,10 @@ void Strat3Processor::setStateInformation (const void* data, int sizeInBytes)
         assistantRev.store (session.revision);
     }
     extra.removeChild (saved, nullptr);
+    // No STEMS child (an older state, or none saved): no cache.
+    const auto stemsTree = extra.getChildWithName (kStemsStateType);
+    processor::restore (stems, stemsTree.getProperty (kStemsCacheProperty).toString().toStdString());
+    extra.removeChild (stemsTree, nullptr);
     extraState = extra;
     requestedOrder.store (encodeOrder (engineOrder (params::decodeLayerOrder (extraState))));
     if (prepared.load() && configPending())

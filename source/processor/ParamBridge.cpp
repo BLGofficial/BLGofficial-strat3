@@ -55,6 +55,17 @@ ParamBridge makeParamBridge (juce::AudioProcessorValueTreeState& apvts)
         b.layer[i] = { g (l + ".on"), g (l + ".depth"), g (l + ".delta") };
     }
 
+    b.stems = { g ("stems.on"), g ("stems.depth"), g ("stems.delta") };
+    const std::array<const char*, dsp::kStems> stems { "voc", "bass", "drm", "oth" };
+    static_assert (dsp::kStemVoc == 0 && dsp::kStemBass == 1 && dsp::kStemDrm == 2 && dsp::kStemOth == 3,
+                   "stem names follow dsp::Stem order");
+    for (std::size_t i = 0; i < stems.size(); ++i)
+    {
+        const std::string base = std::string ("stems.") + stems[i];
+        b.stemGain[i] = g (base + ".gain");
+        b.stemTilt[i] = g (base + ".tilt");
+    }
+
     b.ceilingOn = g ("ceiling.on");
     b.ceilingDb = g ("ceiling.dBTP");
     b.dither = g ("ceiling.dither");
@@ -119,6 +130,12 @@ engine::EngineParams readParams (const ParamBridge& b, bool mono) noexcept
     p.globalDelta = on (b.globalDelta);
     for (std::size_t i = 0; i < p.layer.size(); ++i)
         p.layer[i] = { on (b.layer[i].on), v (b.layer[i].depth), on (b.layer[i].delta) };
+    p.stems = { on (b.stems.on), v (b.stems.depth), on (b.stems.delta) };
+    for (std::size_t i = 0; i < b.stemGain.size(); ++i)
+    {
+        p.stemsSettings.gainDb[i] = v (b.stemGain[i]);
+        p.stemsSettings.tiltDbPerOct[i] = v (b.stemTilt[i]);
+    }
     p.ceilingOn = on (b.ceilingOn);
 
     for (std::size_t i = 0; i < p.eq.size(); ++i)

@@ -2,7 +2,7 @@
 // Contracts tested here:
 //   - buses: mono or stereo main (in == out), optional mono/stereo sidechain, nothing else
 //   - every mapped APVTS parameter lands in exactly its EngineParams field; the only unmapped
-//     ones are stems.* (later module), global.target (assistant), latencyMode and sat.os (config)
+//     ones are global.target (assistant), latencyMode and sat.os (config)
 //   - latencyMode / sat.os changes stay pending until the message thread re-prepares; the new
 //     latency is then reported. Pending compares the *requested* oversampling, so a factor the
 //     engine caps by sample rate does not re-prepare forever
@@ -158,6 +158,15 @@ std::vector<std::pair<std::string, Getter>> fieldTable()
         add (layers[i] + ".depth", [i] (P p) { return f (p.layer[i].depth); });
         add (layers[i] + ".delta", [i] (P p) { return f (p.layer[i].delta); });
     }
+    add ("stems.on", [] (P p) { return f (p.stems.on); });
+    add ("stems.depth", [] (P p) { return f (p.stems.depth); });
+    add ("stems.delta", [] (P p) { return f (p.stems.delta); });
+    const std::array<std::string, dsp::kStems> stems { "voc", "bass", "drm", "oth" };   // dsp::Stem order
+    for (std::size_t i = 0; i < stems.size(); ++i)
+    {
+        add ("stems." + stems[i] + ".gain", [i] (P p) { return f (p.stemsSettings.gainDb[i]); });
+        add ("stems." + stems[i] + ".tilt", [i] (P p) { return f (p.stemsSettings.tiltDbPerOct[i]); });
+    }
 
     for (std::size_t b = 0; b < 8; ++b)
     {
@@ -231,7 +240,7 @@ std::vector<std::pair<std::string, Getter>> fieldTable()
 
 bool isUnmapped (const std::string& id)
 {
-    return id.rfind ("stems.", 0) == 0 || id == "global.target" || id == "global.latencyMode" || id == "sat.os";
+    return id == "global.target" || id == "global.latencyMode" || id == "sat.os";
 }
 
 /** A value inside the range that differs from the default, in plain units. */
