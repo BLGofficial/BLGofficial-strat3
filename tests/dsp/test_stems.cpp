@@ -417,6 +417,29 @@ TEST_CASE ("stems: too little audio for one frame gives an empty cache", "[dsp][
     CHECK (c.masks.empty());
 }
 
+TEST_CASE ("stems: a frame's masks look exactly 8 frames ahead, no further", "[dsp][stems]")
+{
+    // The time median spans 17 frames, centred: the streaming pass can finish frame f once
+    // frame f + 8 is in. Looking one frame further would need an 18th slot in the ring.
+    // Two takes, the same up to frame D - 2 and different from frame D - 1 on: frames up to
+    // D - 10 must match, frame D - 9 (which sees frame D - 1) must not.
+    constexpr int kD = 60;
+    const auto a = noise (1.0, 5, 0.05f);
+    auto b = a;
+    const auto loud = noise (1.0, 9, 0.8f);
+    std::copy (loud.l.begin() + kD * kMaskHop, loud.l.end(), b.l.begin() + kD * kMaskHop);
+    std::copy (loud.r.begin() + kD * kMaskHop, loud.r.end(), b.r.begin() + kD * kMaskHop);
+
+    const auto ca = separate (a.l.data(), a.r.data(), a.size(), kFs, 0);
+    const auto cb = separate (b.l.data(), b.r.data(), b.size(), kFs, 0);
+    REQUIRE (ca.frames > kD + 8);
+    const auto frameBytes = static_cast<std::ptrdiff_t> (kStems * kMaskBins);
+    const auto upTo = [&] (const MaskCache& c, int f) { return std::vector<std::uint8_t> (c.masks.begin(), c.masks.begin() + (f + 1) * frameBytes); };
+    const auto frame = [&] (const MaskCache& c, int f) { return std::vector<std::uint8_t> (c.masks.begin() + f * frameBytes, c.masks.begin() + (f + 1) * frameBytes); };
+    CHECK (upTo (ca, kD - 10) == upTo (cb, kD - 10));
+    CHECK (frame (ca, kD - 9) != frame (cb, kD - 9));
+}
+
 // ------------------------------------------------------------------- fingerprint
 
 TEST_CASE ("stems: a fingerprint streamed sample by sample is the one computed offline", "[dsp][stems]")

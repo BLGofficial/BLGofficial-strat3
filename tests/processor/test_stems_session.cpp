@@ -479,9 +479,13 @@ TEST_CASE ("processor stems: Analyse while the host plays, then the bass gain ap
     program (l, r, samples (4.0));
     REQUIRE (p->startStemsAnalysis());
     CHECK (p->stemsInfo().phase == StemsPhase::Waiting);
-    const auto [al, ar] = hostPlays (*p, head, l, r);
+    // Host blocks of 1000, larger than prepared: each piece must reach the capture at its own
+    // position, or the pass ends at the second piece as a jump.
+    const auto [al, ar] = hostPlays (*p, head, l, r, 1000);
     CHECK (p->stemsInfo().phase == StemsPhase::Ready);
     CHECK (p->stemsInfo().lastEnd == dsp::CaptureEnd::Stopped);
+    CHECK (p->stemsInfo().cacheStartSeconds == 0.0);
+    CHECK_THAT (p->stemsInfo().cacheEndSeconds, WithinAbs (4.0, 0.05));
     // While analysing there was no cache: STEMS only delayed.
     const int lat = p->getLatencySamples();
     CHECK_THAT (levelDb (al, samples (1.0) + lat, samples (3.0) + lat) - levelDb (l, samples (1.0), samples (3.0)), WithinAbs (0.0, 0.3));

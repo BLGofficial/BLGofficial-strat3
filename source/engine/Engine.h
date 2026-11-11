@@ -445,7 +445,7 @@ inline void setParams (Engine& e, const EngineParams& in) noexcept
     depth (e.widthBlend, kWidth);
     depth (e.satBlend, kSat);
     depth (e.limitBlend, kLimit);
-    dsp::setDepth (e.stemsBlend, p.stems.depth, p.stems.on && stemsInChain (e.config.mode));
+    dsp::setDepth (e.stemsBlend, p.stems.depth, p.stems.on);   // TRACK never runs it
 
     setTarget (e.inTrim, std::isfinite (p.inTrimDb) ? std::clamp (p.inTrimDb, -24.0f, 24.0f) : e.inTrim.target);
     setTarget (e.outTrim, std::isfinite (p.outTrimDb) ? std::clamp (p.outTrimDb, -24.0f, 24.0f) : e.outTrim.target);

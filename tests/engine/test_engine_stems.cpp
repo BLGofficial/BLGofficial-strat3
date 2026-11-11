@@ -343,9 +343,17 @@ TEST_CASE ("engine stems: a block longer than the prepared size is processed in 
     auto a = make (LatencyMode::Mix, p), b = make (LatencyMode::Mix, p);
     setStemsCache (*a, &cache);
     setStemsCache (*b, &cache);
+    // The cache is bass everywhere, so a wrong position would still sound right: the capture
+    // is what checks each piece's position (a piece at the wrong one ends it as a jump).
+    dsp::StemsCapture capture;
+    dsp::prepare (capture, samples (2.0));
+    REQUIRE (dsp::arm (capture));
+    setStemsCapture (*b, &capture);
     auto la = l, ra = r, lb = l, rb = r;
     play (*a, la, ra, 0, kBlock);
     play (*b, lb, rb, 0, 2000);   // 2000 > maxBlock 512
+    CHECK (dsp::state (capture) == dsp::CaptureState::Running);
+    CHECK (dsp::available (capture) == static_cast<std::int64_t> (l.size()));
     float d = 0.0f;
     for (size_t i = 0; i < la.size(); ++i)
         d = std::max ({ d, std::abs (la[i] - lb[i]), std::abs (ra[i] - rb[i]) });
